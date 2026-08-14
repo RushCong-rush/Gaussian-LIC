@@ -227,6 +227,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     gaussians->saveMap(result_path);
 
     std::cout << "\n\n😋 Gaussian-LIC Done!\n\n\n";
+    ros::shutdown();
 }
 
 int main(int argc, char** argv)

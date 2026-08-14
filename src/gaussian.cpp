@@ -150,7 +150,7 @@ void Dataset::addFrame(Frame& cur_frame)
         if (depth_completion_)
         {
             cv::Mat completed_depth;  // metric float32
-            completed_depth = depth_completer_.complete(image_rgb, depth_map);
+            completed_depth = depth_completer_->complete(image_rgb, depth_map);
 
             cv::Mat mask_known = depth_map > 0;  // 0/255 uint8
             cv::Mat completed_depth_known;

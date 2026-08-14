@@ -24,19 +24,27 @@ find_package(catkin REQUIRED COMPONENTS
   eigen_conversions
 )
 
-set(OpenCV_DIR ~/Software/opencv/opencv-4.7.0/build)
 find_package(OpenCV 4 REQUIRED)
-set(Torch_DIR ~/Software/libtorch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 
-set(TENSORRT_ROOT "~/Software/TensorRT-8.6.1.6")
-set(TENSORRT_INCLUDE_DIR "${TENSORRT_ROOT}/include")
-set(TENSORRT_LIB_DIR "${TENSORRT_ROOT}/lib")
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h
+  PATHS /usr/include/x86_64-linux-gnu /usr/include)
+find_library(TENSORRT_LIBRARY
+  NAMES nvinfer libnvinfer.so.10
+  PATHS /usr/lib/x86_64-linux-gnu /usr/lib)
+find_library(TENSORRT_PLUGIN_LIBRARY
+  NAMES nvinfer_plugin libnvinfer_plugin.so.10
+  PATHS /usr/lib/x86_64-linux-gnu /usr/lib)
+if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_LIBRARY OR NOT TENSORRT_PLUGIN_LIBRARY)
+  message(FATAL_ERROR "TensorRT headers/runtime were not found")
+endif()
 
-set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda-11.7")
+set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda" CACHE PATH "CUDA toolkit root")
 set(CUDA_INCLUDE_DIRS "${CUDA_TOOLKIT_ROOT_DIR}/include")
 set(CUDA_LIB_DIR "${CUDA_TOOLKIT_ROOT_DIR}/lib64")
 find_package(CUDA REQUIRED)
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode=arch=compute_120,code=sm_120")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 find_library(FFI_LIB ffi)
 
 find_package(PkgConfig REQUIRED)
@@ -85,7 +93,5 @@ target_link_libraries(gs_mapping
                       ${Python3_LIBRARIES}
                       ${FFI_LIB}
                       ${CUDA_LIB_DIR}/libcudart.so
-                      ${TENSORRT_LIB_DIR}/libnvinfer.so
-                      ${TENSORRT_LIB_DIR}/libnvonnxparser.so
-                      ${TENSORRT_LIB_DIR}/libnvparsers.so
-                      ${TENSORRT_LIB_DIR}/libnvinfer_plugin.so)
+                      ${TENSORRT_LIBRARY}
+                      ${TENSORRT_PLUGIN_LIBRARY})

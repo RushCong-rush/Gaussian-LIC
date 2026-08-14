@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 set -e
 
-TENSORRT_ROOT=~/Software/TensorRT-8.6.1.6
-TRT_BIN=$TENSORRT_ROOT/bin/trtexec
-TRT_LIB=$TENSORRT_ROOT/targets/x86_64-linux-gnu/lib
+TRT_BIN=${TRT_BIN:-$(command -v trtexec || true)}
+if [[ -z "$TRT_BIN" && -x /usr/src/tensorrt/bin/trtexec ]]; then
+  TRT_BIN=/usr/src/tensorrt/bin/trtexec
+fi
 
 echo ">>> Deactivating conda env (if any)"
 conda deactivate || true
 
-echo ">>> Setting TensorRT LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$TRT_LIB
+if [[ -z "$TRT_BIN" ]]; then
+  echo "trtexec is not installed or not in PATH" >&2
+  exit 2
+fi
 
 echo ">>> Building TensorRT engine: 512x640"
 $TRT_BIN \

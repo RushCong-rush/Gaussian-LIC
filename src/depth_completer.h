@@ -21,7 +21,9 @@
 #include <vector>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <cuda_runtime_api.h>
 #include "NvInfer.h"
+#include "NvInferPlugin.h"
 
 class DepthCompleter 
 {
@@ -59,5 +61,11 @@ private:
     std::unique_ptr<nvinfer1::IExecutionContext, InferDeleter> mContext;
     std::vector<void*> mDeviceBuffers;
     std::vector<std::vector<float>> mHostBuffers;
+    std::vector<std::string> mTensorNames;
+    int mRgbIndex{-1};
+    int mDepthIndex{-1};
+    int mMaskIndex{-1};
+    int mOutputIndex{-1};
+    cudaStream_t mStream{};
     int mInputWidth, mInputHeight;
 };
