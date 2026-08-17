@@ -26,6 +26,8 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+constexpr float ERP_PI = 3.14159265358979323846f;
+
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* dc, const float* shs, bool* clamped)
 {
 	glm::vec3 pos = means[idx];
@@ -115,6 +117,41 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	cov[0][0] += 0.3f;
 	cov[1][1] += 0.3f;
 	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+}
+
+__device__ float3 computeErpCov2D(
+	const float longitude, const float latitude, const float distance,
+	const float* cov3D, const float* viewmatrix, const int H, const int W)
+{
+	const float x_scale = W / (2.0f * ERP_PI);
+	const float y_scale = H / ERP_PI;
+	const float cos_latitude = max(fabsf(cosf(latitude)), 1.0e-4f);
+	const float safe_distance = max(distance, 1.0e-4f);
+
+	glm::mat3 spherical_scale = glm::mat3(
+		x_scale / (cos_latitude * safe_distance), 0.0f, 0.0f,
+		0.0f, y_scale / safe_distance, 0.0f,
+		0.0f, 0.0f, 0.0f);
+
+	glm::mat3 tangent_basis = glm::mat3(
+		cosf(longitude), 0.0f, -sinf(longitude),
+		sinf(latitude) * sinf(longitude), cosf(latitude), sinf(latitude) * cosf(longitude),
+		cosf(latitude) * sinf(longitude), -sinf(latitude), cosf(latitude) * cosf(longitude));
+
+	glm::mat3 world_to_camera = glm::mat3(
+		viewmatrix[0], viewmatrix[4], viewmatrix[8],
+		viewmatrix[1], viewmatrix[5], viewmatrix[9],
+		viewmatrix[2], viewmatrix[6], viewmatrix[10]);
+	glm::mat3 jacobian = world_to_camera * tangent_basis * spherical_scale;
+
+	glm::mat3 covariance_3d = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+	glm::mat3 covariance_2d = glm::transpose(jacobian) * covariance_3d * jacobian;
+	covariance_2d[0][0] += 0.3f;
+	covariance_2d[1][1] += 0.3f;
+	return {float(covariance_2d[0][0]), float(covariance_2d[0][1]), float(covariance_2d[1][1])};
 }
 
 __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 rot, float* cov3D)
@@ -259,7 +296,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered, bool no_color) 
+	bool prefiltered, bool no_color, bool equirectangular)
 {
 	auto idx = cg::this_grid().thread_rank();
 	bool active = true;
@@ -269,20 +306,44 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		idx = P - 1;
 	}
 	
-	radii[idx] = 0;
-	tiles_touched[idx] = 0;
-
-	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)) { active = false; }
+	if (active)
+	{
+		radii[idx] = 0;
+		tiles_touched[idx] = 0;
+	}
 
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
-	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
-	float p_w = 1.0f / (p_hom.w + 0.0000001f);
-	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+	float3 p_view = transformPoint4x3(p_orig, viewmatrix);
+	const float radial_depth = sqrtf(p_view.x * p_view.x + p_view.y * p_view.y + p_view.z * p_view.z);
+	if (equirectangular ? radial_depth <= 0.2f : !in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+	{
+		active = false;
+	}
+
+	float2 point_image;
+	float longitude = 0.0f;
+	float latitude = 0.0f;
+	if (equirectangular)
+	{
+		longitude = atan2f(p_view.x, p_view.z);
+		latitude = atan2f(-p_view.y, hypotf(p_view.x, p_view.z));
+		point_image = {
+			(longitude / ERP_PI + 1.0f) * W * 0.5f,
+			(0.5f - latitude / ERP_PI) * H};
+	}
+	else
+	{
+		float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+		float p_w = 1.0f / (p_hom.w + 0.0000001f);
+		float3 p_proj = {p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w};
+		point_image = {ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H)};
+	}
 
 	computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
 	const float* cov3D = cov3Ds + idx * 6;
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, limx_neg, limx_pos, limy_neg, limy_pos, cov3D, viewmatrix);
+	float3 cov = equirectangular
+		? computeErpCov2D(longitude, latitude, radial_depth, cov3D, viewmatrix, H, W)
+		: computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, limx_neg, limx_pos, limy_neg, limy_pos, cov3D, viewmatrix);
 
 	float det = (cov.x * cov.z - cov.y * cov.y);
 	if (det == 0.0f) { active = false; }
@@ -296,11 +357,26 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float mid = 0.5f * (cov.x + cov.z);
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float my_radius = ceil(3.f * sqrt(lambda1));
-	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
-	uint2 rect_min, rect_max;
-	getRect(point_image, my_radius, rect_min, rect_max, grid);
-	const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
-	const int tile_count = computeTilebasedCullingTileCount(active, co, point_image,  opacity_factor_threshold, rect_min, rect_max);
+	uint2 rect_min, rect_max, rect_min_1, rect_max_1;
+	int tile_count = 0;
+	if (equirectangular)
+	{
+		const int rect_count = getErpRects(point_image, my_radius, W, grid, rect_min, rect_max, rect_min_1, rect_max_1);
+		const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
+		float2 culling_point = point_image;
+		tile_count = computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min, rect_max);
+		if (rect_count == 2)
+		{
+			culling_point.x += point_image.x - my_radius < 0.0f ? W : -W;
+			tile_count += computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min_1, rect_max_1);
+		}
+	}
+	else
+	{
+		getRect(point_image, my_radius, rect_min, rect_max, grid);
+		const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
+		tile_count = computeTilebasedCullingTileCount(active, co, point_image, opacity_factor_threshold, rect_min, rect_max);
+	}
 	if (tile_count == 0 || !active) return;  // Cooperative threads no longer needed (after load balancing)
 
 	if (!no_color) 
@@ -311,7 +387,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		rgb[idx * C + 2] = result.z;
 	}
 
-	depths[idx] = p_view.z;
+	depths[idx] = equirectangular ? radial_depth : p_view.z;
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	conic_opacity[idx] = co;
@@ -336,7 +412,8 @@ renderCUDA(
 	float* __restrict__ out_color,
 	float* __restrict__ out_final_T,
 	float* __restrict__ out_depth,
-	bool no_color) 
+	bool no_color,
+	bool equirectangular)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -429,8 +506,10 @@ renderCUDA(
 
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
-			float2 xy = collected_xy[j];
-			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+				float2 xy = collected_xy[j];
+				float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+				if (equirectangular)
+					d.x = periodicPixelDifference(d.x, W);
 			float4 con_o = collected_conic_opacity[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f) { continue; }
@@ -503,7 +582,8 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	float* out_color, 
 	float* out_final_T,
 	float* out_depth,
-	bool no_color) 
+	bool no_color,
+	bool equirectangular)
 {
 	renderCUDA<NUM_CHAFFELS> <<<grid, block>>> (
 		ranges,
@@ -521,7 +601,8 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 		out_color,
 		out_final_T,
 		out_depth,
-		no_color);
+		no_color,
+		equirectangular);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -553,7 +634,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered, bool no_color)
+	bool prefiltered, bool no_color, bool equirectangular)
 {
 	preprocessCUDA<NUM_CHAFFELS> <<<(P + 255) / 256, 256>>> (
 		P, D, M,
@@ -585,5 +666,5 @@ void FORWARD::preprocess(int P, int D, int M,
 		conic_opacity,
 		grid,
 		tiles_touched,
-		prefiltered, no_color);
+		prefiltered, no_color, equirectangular);
 }

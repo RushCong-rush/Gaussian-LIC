@@ -118,7 +118,7 @@ __global__ void duplicateWithKeys(
 	const uint32_t remaining_threads = __ballot_sync(WARP_MASK, compute_cooperatively);
 	if (remaining_threads == 0) 
 	{ 
-		while (off < offset_to) 
+		while (active && off < offset_to)
 		{
 			uint64_t key = (uint32_t) -1;
 			key <<= 32;
@@ -180,7 +180,7 @@ __global__ void duplicateWithKeys(
 		}
 	}
 
-	while (off < offset_to) 
+	while (active && off < offset_to)
 	{
 		uint64_t key = (uint32_t) -1;
 		key <<= 32;
@@ -189,6 +189,144 @@ __global__ void duplicateWithKeys(
 		gaussian_keys_unsorted[off] = key;
 		gaussian_values_unsorted[off] = static_cast<uint32_t>(-1);
 		off++;
+	}
+}
+
+__global__ void duplicateWithKeysErp(
+	int P,
+	const float2* points_xy,
+	const float4* __restrict__ conic_opacity,
+	const float* depths,
+	const uint32_t* offsets,
+	uint64_t* gaussian_keys_unsorted,
+	uint32_t* gaussian_values_unsorted,
+	const int* radii,
+	dim3 grid,
+	int width)
+{
+	const int global_idx = cg::this_grid().thread_rank();
+	bool active = true;
+	int idx = global_idx;
+	if (idx >= P)
+	{
+		active = false;
+		idx = P - 1;
+	}
+	if (radii[idx] <= 0)
+		active = false;
+	if (__ballot_sync(WARP_MASK, active) == 0)
+		return;
+
+	uint32_t off = idx == 0 ? 0 : offsets[idx - 1];
+	const uint32_t offset_to = offsets[idx];
+	const float2 xy = points_xy[idx];
+	const float4 co = conic_opacity[idx];
+	const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
+
+	uint2 rect_min_0, rect_max_0, rect_min_1, rect_max_1;
+	const int rect_count = getErpRects(
+		xy, radii[idx], width, grid,
+		rect_min_0, rect_max_0, rect_min_1, rect_max_1);
+
+	const uint32_t lane_idx = cg::this_thread_block().thread_rank() % WARP_SIZE;
+	const unsigned int lane_mask_allprev_excl = 0xFFFFFFFFU >> (WARP_SIZE - lane_idx);
+
+	// Process the two seam-split rectangles independently. The same opacity
+	// test as preprocess keeps the scanned offsets and written entries aligned.
+	for (int rect_idx = 0; rect_idx < 2; ++rect_idx)
+	{
+		const bool has_rect = rect_idx < rect_count;
+		const uint2 rect_min = rect_idx == 0 ? rect_min_0 : rect_min_1;
+		const uint2 rect_max = rect_idx == 0 ? rect_max_0 : rect_max_1;
+		float2 culling_xy = xy;
+		if (rect_idx == 1 && rect_count == 2)
+			culling_xy.x += xy.x - radii[idx] < 0.0f ? width : -width;
+		const uint32_t rect_width = rect_max.x - rect_min.x;
+		const int32_t tile_count_init = (rect_max.y - rect_min.y) * rect_width;
+
+		if (active && has_rect && tile_count_init > 0)
+		{
+			for (int tile_idx = 0; tile_idx < tile_count_init && tile_idx < SEQUENTIAL_TILE_THRESH && off < offset_to; ++tile_idx)
+			{
+				const int y = (tile_idx / rect_width) + rect_min.y;
+				const int x = (tile_idx % rect_width) + rect_min.x;
+				const glm::vec2 tile_min = {x * BLOCK_X, y * BLOCK_Y};
+				const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
+				glm::vec2 max_pos;
+				if (max_contrib_power_rect_gaussian_float(co, culling_xy, tile_min, tile_max, max_pos) <= opacity_factor_threshold)
+				{
+					uint64_t key = y * grid.x + x;
+					key <<= 32;
+					key |= *reinterpret_cast<const uint32_t*>(&depths[idx]);
+					gaussian_keys_unsorted[off] = key;
+					gaussian_values_unsorted[off] = idx;
+					++off;
+				}
+			}
+		}
+
+		const int32_t compute_cooperatively = active && has_rect && tile_count_init > SEQUENTIAL_TILE_THRESH;
+		const uint32_t remaining_threads = __ballot_sync(WARP_MASK, compute_cooperatively);
+		if (remaining_threads == 0)
+			continue;
+
+		const uint32_t n_remaining_threads = __popc(remaining_threads);
+		for (int n = 0; n < n_remaining_threads && n < WARP_SIZE; ++n)
+		{
+			const int i = __fns(remaining_threads, 0, n + 1);
+			const uint32_t idx_i = __shfl_sync(WARP_MASK, idx, i);
+			uint32_t off_i = __shfl_sync(WARP_MASK, off, i);
+			const uint32_t offset_to_i = __shfl_sync(WARP_MASK, offset_to, i);
+			const uint2 rect_min_i = make_uint2(__shfl_sync(WARP_MASK, rect_min.x, i), __shfl_sync(WARP_MASK, rect_min.y, i));
+			const uint2 rect_max_i = make_uint2(__shfl_sync(WARP_MASK, rect_max.x, i), __shfl_sync(WARP_MASK, rect_max.y, i));
+			const float2 xy_i = {__shfl_sync(WARP_MASK, culling_xy.x, i), __shfl_sync(WARP_MASK, culling_xy.y, i)};
+			const float4 co_i = {
+				__shfl_sync(WARP_MASK, co.x, i),
+				__shfl_sync(WARP_MASK, co.y, i),
+				__shfl_sync(WARP_MASK, co.z, i),
+				__shfl_sync(WARP_MASK, co.w, i)};
+			const float opacity_factor_threshold_i = __shfl_sync(WARP_MASK, opacity_factor_threshold, i);
+			const uint32_t rect_width_i = rect_max_i.x - rect_min_i.x;
+			const uint32_t rect_tile_count_i = (rect_max_i.y - rect_min_i.y) * rect_width_i;
+			const uint32_t remaining_tile_count = rect_tile_count_i - SEQUENTIAL_TILE_THRESH;
+			const int32_t n_iterations = (remaining_tile_count + WARP_SIZE - 1) / WARP_SIZE;
+
+			for (int it = 0; it < n_iterations; ++it)
+			{
+				const int tile_idx = it * WARP_SIZE + lane_idx + SEQUENTIAL_TILE_THRESH;
+				const bool active_curr_it = tile_idx < rect_tile_count_i;
+				const int y = (tile_idx / rect_width_i) + rect_min_i.y;
+				const int x = (tile_idx % rect_width_i) + rect_min_i.x;
+				const glm::vec2 tile_min = {x * BLOCK_X, y * BLOCK_Y};
+				const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
+				glm::vec2 max_pos;
+				const bool write = active_curr_it && max_contrib_power_rect_gaussian_float(co_i, xy_i, tile_min, tile_max, max_pos) <= opacity_factor_threshold_i;
+				const uint32_t write_ballot = __ballot_sync(WARP_MASK, write);
+				const uint32_t n_writes = __popc(write_ballot);
+				const uint32_t write_offset = off_i + __popc(write_ballot & lane_mask_allprev_excl);
+				if (write && write_offset < offset_to_i)
+				{
+					uint64_t key = y * grid.x + x;
+					key <<= 32;
+					key |= *reinterpret_cast<const uint32_t*>(&depths[idx_i]);
+					gaussian_keys_unsorted[write_offset] = key;
+					gaussian_values_unsorted[write_offset] = idx_i;
+				}
+				off_i += n_writes;
+				off += (i == lane_idx) * n_writes;
+			}
+		}
+	}
+
+	while (active && off < offset_to)
+	{
+		uint64_t key = (uint32_t)-1;
+		key <<= 32;
+		const float depth = FLT_MAX;
+		key |= *reinterpret_cast<const uint32_t*>(&depth);
+		gaussian_keys_unsorted[off] = key;
+		gaussian_values_unsorted[off] = static_cast<uint32_t>(-1);
+		++off;
 	}
 }
 
@@ -202,15 +340,19 @@ __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* rang
 	bool valid_tile = currtile != (uint32_t) -1;
 
 	if (idx == 0)
-		ranges[currtile].x = 0;
+	{
+		if (valid_tile)
+			ranges[currtile].x = 0;
+	}
 	else
 	{
 		uint32_t prevtile = point_list_keys[idx - 1] >> 32;
 		if (currtile != prevtile)
 		{
-			ranges[prevtile].y = idx;
+			if (prevtile != (uint32_t) -1)
+				ranges[prevtile].y = idx;
 			if (valid_tile) 
-			ranges[currtile].x = idx;
+				ranges[currtile].x = idx;
 		}
 	}
 	if (idx == L - 1 && valid_tile)
@@ -341,7 +483,7 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 	float* out_final_T,
 	float* out_depth,
 	int* radii,
-	bool debug, bool no_color) 
+	bool debug, bool no_color, bool equirectangular)
 {
 	if (NUM_CHAFFELS != 3 && colors_precomp == nullptr) 
 	{ 
@@ -392,7 +534,8 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 		tile_grid,
 		geomState.tiles_touched,
 		prefiltered, 
-		no_color
+		no_color,
+		equirectangular
 	), debug)
 
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
@@ -404,17 +547,34 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
-	duplicateWithKeys <<<(P + 255) / 256, 256>>> (
-		P,
-		geomState.means2D,
-		geomState.conic_opacity,
-		geomState.depths,
-		geomState.point_offsets,
-		binningState.point_list_keys_unsorted,
-		binningState.point_list_unsorted,
-		radii,
-		tile_grid,
-		nullptr)
+	if (equirectangular)
+	{
+		duplicateWithKeysErp <<<(P + 255) / 256, 256>>> (
+			P,
+			geomState.means2D,
+			geomState.conic_opacity,
+			geomState.depths,
+			geomState.point_offsets,
+			binningState.point_list_keys_unsorted,
+			binningState.point_list_unsorted,
+			radii,
+			tile_grid,
+			width);
+	}
+	else
+	{
+		duplicateWithKeys <<<(P + 255) / 256, 256>>> (
+			P,
+			geomState.means2D,
+			geomState.conic_opacity,
+			geomState.depths,
+			geomState.point_offsets,
+			binningState.point_list_keys_unsorted,
+			binningState.point_list_unsorted,
+			radii,
+			tile_grid,
+			nullptr);
+	}
 	CHECK_CUDA(, debug)
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);  // TODO
@@ -467,7 +627,7 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		imgState.max_contrib,
 		background,
-		out_color, out_final_T, out_depth, no_color), debug)
+		out_color, out_final_T, out_depth, no_color, equirectangular), debug)
 
 	if (!no_color) 
 	{
@@ -518,7 +678,8 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_drot,
 	float* dL_ddepth,
 	const float lambda_erank,
-	bool debug) 
+	bool debug,
+	bool equirectangular)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -556,12 +717,13 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dpix_depth,
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
-		dL_dopacity,
-		dL_dcolor,
-	    dL_ddepth), debug)
+			dL_dopacity,
+			dL_dcolor,
+		    dL_ddepth,
+			equirectangular), debug)
 
 	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
-	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
+	CHECK_CUDA(BACKWARD::preprocess(P, D, M, width, height,
 		(float3*)means3D,
 		radii,
 		dc,
@@ -588,7 +750,8 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dcov3D,
 		dL_ddc,
 		dL_dsh,
-		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot,
-		lambda_erank), debug)
+			(glm::vec3*)dL_dscale,
+			(glm::vec4*)dL_drot,
+			lambda_erank,
+			equirectangular), debug)
 }

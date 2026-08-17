@@ -50,10 +50,12 @@ namespace BACKWARD
 		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors,
-	    float* dL_ddepth);
+	    float* dL_ddepth,
+		bool equirectangular);
 
 	void preprocess(
 		int P, int D, int M,
+		int W, int H,
 		const float3* means,
 		const int* radii,
 		const float* dc,
@@ -82,7 +84,8 @@ namespace BACKWARD
 		float* dL_dsh,
 		glm::vec3* dL_dscale,
 		glm::vec4* dL_drot,
-		const float lambda_erank);
+		const float lambda_erank,
+		bool equirectangular);
 }
 
 #endif

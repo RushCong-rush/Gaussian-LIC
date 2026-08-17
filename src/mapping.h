@@ -62,6 +62,11 @@ public:
         fy = node["fy"].as<double>();
         cx = node["cx"].as<double>();
         cy = node["cy"].as<double>();
+        const std::string camera_model =
+            node["camera_model"] ? node["camera_model"].as<std::string>() : "pinhole";
+        if (camera_model != "pinhole" && camera_model != "equirectangular" && camera_model != "erp")
+            throw std::invalid_argument("Unsupported camera model: " + camera_model);
+        equirectangular = camera_model != "pinhole";
 
         select_every_k_frame = node["select_every_k_frame"].as<int>();
         depth_completion = node["depth_completion"].as<bool>();
@@ -71,7 +76,10 @@ public:
         if (height == 512 && width == 640) engine_path = pkg_path + "/ckpt/spnet_512_640.engine";
         if (height == 480 && width == 640) engine_path = pkg_path + "/ckpt/spnet_480_640.engine";
 
-        sh_degree = node["sh_degree"].as<int>();
+        sh_degree = node["sh_degree"] ? node["sh_degree"].as<int>() : 1;
+        if (sh_degree < 0 || sh_degree > 3)
+            throw std::invalid_argument("sh_degree must be between 0 and 3");
+        metric_mask_path = node["metric_mask_path"] ? node["metric_mask_path"].as<std::string>() : "";
         white_background = node["white_background"].as<bool>();
         random_background = node["random_background"].as<bool>();
         convert_SHs_python = node["convert_SHs_python"].as<bool>();
@@ -102,6 +110,7 @@ public:
     double fy;
     double cx;
     double cy;
+    bool equirectangular;
 
     int select_every_k_frame;
     bool depth_completion;
@@ -111,6 +120,7 @@ public:
 
     /// gaussian
     int sh_degree;
+    std::string metric_mask_path;
     bool white_background;
     bool random_background;
     bool convert_SHs_python;

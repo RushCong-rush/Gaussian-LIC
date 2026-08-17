@@ -47,7 +47,8 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
-	const bool debug, const bool no_color = false);
+	const bool debug, const bool no_color = false,
+	const bool equirectangular = false);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
@@ -80,7 +81,8 @@ RasterizeGaussiansBackwardCUDA(
 	const int B,
 	const torch::Tensor& sampleBuffer,
 	const float lambda_erank,
-	const bool debug);
+	const bool debug,
+	const bool equirectangular = false);
 
 void adamUpdate(
 	torch::Tensor &param,

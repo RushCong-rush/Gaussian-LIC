@@ -136,8 +136,10 @@ void Dataset::addFrame(Frame& cur_frame)
         Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
         Eigen::Vector3d t_cw = - R_cw * t_wc;
         Eigen::Vector3d pt_c = R_cw * pointcloud_.back() + t_cw;
-        assert(pt_c(2) > 0);
-        pointdepth_.push_back(static_cast<float>(pt_c(2)));
+        if (!equirectangular_)
+            assert(pt_c(2) > 0);
+        pointdepth_.push_back(static_cast<float>(
+            equirectangular_ ? pt_c.norm() : pt_c(2)));
     }
 
     /// train & test
@@ -209,6 +211,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "train_" + formatted_str + ".jpg";
 
+        cam->setCameraModel(equirectangular_);
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
         cam->setPose(q_wc.toRotationMatrix(), t_wc);
 
@@ -227,6 +230,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "test_" + formatted_str + ".jpg";
 
+        cam->setCameraModel(equirectangular_);
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
         cam->setPose(q_wc.toRotationMatrix(), t_wc);
 
@@ -482,11 +486,14 @@ void GaussianModel::saveMap(const std::string& result_path)
     for (int i = 0; i < n_f_rest; ++i)
         property_names_f_rest[i] = "f_rest_" + std::to_string(i);
 
-    result_file.add_properties_to_element(
-        "vertex", property_names_f_rest,
-        tinyply::Type::FLOAT32, this->features_rest_.size(0),
-        reinterpret_cast<uint8_t*>(f_rest.data_ptr<float>()),
-        tinyply::Type::INVALID, 0);
+    if (n_f_rest > 0)
+    {
+        result_file.add_properties_to_element(
+            "vertex", property_names_f_rest,
+            tinyply::Type::FLOAT32, this->features_rest_.size(0),
+            reinterpret_cast<uint8_t*>(f_rest.data_ptr<float>()),
+            tinyply::Type::INVALID, 0);
+    }
 
     // opacities
     result_file.add_properties_to_element(
@@ -668,14 +675,35 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     torch::Tensor R_cw_tensor = torch::from_blob(float_R_cw.data(), {3, 3}).to(torch::kFloat32).cuda();
     torch::Tensor t_cw_tensor = torch::from_blob(float_t_cw.data(), {3, 1}).to(torch::kFloat32).cuda();
     auto points_camera = torch::matmul(points, R_cw_tensor.t()) + t_cw_tensor.view({1, 3});  // (n, 3)
-    auto depths = points_camera.index({torch::indexing::Slice(), 2});  // (n)
+    const int H = viewpoint_cam->image_height_;
+    const int W = viewpoint_cam->image_width_;
     float fx = static_cast<float>(viewpoint_cam->fx_);
     float fy = static_cast<float>(viewpoint_cam->fy_);
     float cx = static_cast<float>(viewpoint_cam->cx_);
     float cy = static_cast<float>(viewpoint_cam->cy_);
     float focal = (fx + fy) / 2.0;
-    torch::Tensor x_pixel = (points_camera.index({torch::indexing::Slice(), 0}) * fx) / depths + cx;
-    torch::Tensor y_pixel = (points_camera.index({torch::indexing::Slice(), 1}) * fy) / depths + cy;
+    torch::Tensor depths;
+    torch::Tensor x_pixel;
+    torch::Tensor y_pixel;
+    if (viewpoint_cam->is_equirectangular_)
+    {
+        auto x = points_camera.index({torch::indexing::Slice(), 0});
+        auto y = points_camera.index({torch::indexing::Slice(), 1});
+        auto z = points_camera.index({torch::indexing::Slice(), 2});
+        depths = torch::linalg_vector_norm(points_camera, 2, {1});
+        auto longitude = torch::atan2(x, z);
+        auto latitude = torch::atan2(-y, torch::sqrt(x * x + z * z));
+        x_pixel = torch::remainder((longitude / M_PI + 1.0) * (0.5 * W), W);
+        y_pixel = (0.5 - latitude / M_PI) * H;
+        focal = 0.5f * (static_cast<float>(W) / (2.0f * M_PI) +
+                        static_cast<float>(H) / M_PI);
+    }
+    else
+    {
+        depths = points_camera.index({torch::indexing::Slice(), 2});  // (n)
+        x_pixel = (points_camera.index({torch::indexing::Slice(), 0}) * fx) / depths + cx;
+        y_pixel = (points_camera.index({torch::indexing::Slice(), 1}) * fy) / depths + cy;
+    }
     auto pixels = torch::stack({x_pixel, y_pixel}, 1);  // (n, 2)
     pixels = pixels.floor().to(torch::kInt32);
 
@@ -710,7 +738,6 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto filtered_depths_in_rsp_frame = depths_in_rsp_frame.index_select(0, keep_indices_tensor);
     auto filtered_pixels = pixels.index_select(0, keep_indices_tensor);
 
-    int H = viewpoint_cam->image_height_, W = viewpoint_cam->image_width_;
     auto filter = [H, W, &rendered_alpha](const torch::Tensor& points, 
                                         const torch::Tensor& colors, 
                                         const torch::Tensor& depths_in_rsp_frame, 
@@ -906,6 +933,10 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
         std::cerr << "lpips model loading failed: " << e.what() << std::endl;
     }
 
+    torch::Tensor metric_mask;
+    if (dataset->metric_mask_.defined())
+        metric_mask = dataset->metric_mask_.to(torch::kCUDA);
+
     {
         double psnrs = 0;
         double ssims = 0;
@@ -916,11 +947,24 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
             auto gt_image = train_camera->original_image_.cuda().clamp(0, 1);
-            double psnr = loss_utils::psnr(rendered_image, gt_image).mean().item<double>();
-            double ssim = loss_utils::ssim(rendered_image, gt_image).item<double>();
+            const bool use_metric_mask = metric_mask.defined() && train_camera->is_equirectangular_;
+            auto metric_rendered = rendered_image;
+            auto metric_gt = gt_image;
+            if (use_metric_mask)
+            {
+                auto mask = metric_mask.unsqueeze(0);
+                metric_rendered = rendered_image * mask;
+                metric_gt = gt_image * mask;
+            }
+            double psnr = use_metric_mask
+                ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
+                : loss_utils::psnr(rendered_image, gt_image).item<double>();
+            double ssim = use_metric_mask
+                ? loss_utils::ssim_masked(metric_rendered, metric_gt, metric_mask).item<double>()
+                : loss_utils::ssim(rendered_image, gt_image).item<double>();
             std::vector<torch::jit::IValue> inputs;
-            inputs.push_back(rendered_image.unsqueeze(0));
-            inputs.push_back(gt_image.unsqueeze(0));
+            inputs.push_back(metric_rendered.unsqueeze(0));
+            inputs.push_back(metric_gt.unsqueeze(0));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
             psnrs += psnr;
             ssims += ssim;
@@ -965,11 +1009,24 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
             auto gt_image = test_camera->original_image_.cuda().clamp(0, 1);
-            double psnr = loss_utils::psnr(rendered_image, gt_image).mean().item<double>();
-            double ssim = loss_utils::ssim(rendered_image, gt_image).item<double>();
+            const bool use_metric_mask = metric_mask.defined() && test_camera->is_equirectangular_;
+            auto metric_rendered = rendered_image;
+            auto metric_gt = gt_image;
+            if (use_metric_mask)
+            {
+                auto mask = metric_mask.unsqueeze(0);
+                metric_rendered = rendered_image * mask;
+                metric_gt = gt_image * mask;
+            }
+            double psnr = use_metric_mask
+                ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
+                : loss_utils::psnr(rendered_image, gt_image).item<double>();
+            double ssim = use_metric_mask
+                ? loss_utils::ssim_masked(metric_rendered, metric_gt, metric_mask).item<double>()
+                : loss_utils::ssim(rendered_image, gt_image).item<double>();
             std::vector<torch::jit::IValue> inputs;
-            inputs.push_back(rendered_image.unsqueeze(0));
-            inputs.push_back(gt_image.unsqueeze(0));
+            inputs.push_back(metric_rendered.unsqueeze(0));
+            inputs.push_back(metric_gt.unsqueeze(0));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
             psnrs += psnr;
             ssims += ssim;

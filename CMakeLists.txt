@@ -95,3 +95,16 @@ target_link_libraries(gs_mapping
                       ${CUDA_LIB_DIR}/libcudart.so
                       ${TENSORRT_LIBRARY}
                       ${TENSORRT_PLUGIN_LIBRARY})
+
+add_executable(erp_rasterizer_forward_test
+              ${PROJECT_SOURCE_DIR}/tests/test_erp_rasterizer_forward.cpp
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/rasterize_points.cu
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/adam.cu
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/forward.cu
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/backward.cu
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/rasterizer_impl.cu)
+target_link_libraries(erp_rasterizer_forward_test
+                      ${TORCH_LIBRARIES}
+                      ${Python3_LIBRARIES}
+                      ${FFI_LIB}
+                      ${CUDA_LIB_DIR}/libcudart.so)

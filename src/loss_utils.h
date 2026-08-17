@@ -38,6 +38,15 @@ inline torch::Tensor psnr(torch::Tensor &img1, torch::Tensor &img2)
     return 10.0f * torch::log10(1.0f / mse);
 }
 
+inline torch::Tensor masked_psnr(
+    torch::Tensor &img1, torch::Tensor &img2, torch::Tensor &mask)
+{
+    auto valid = mask.unsqueeze(0).expand_as(img1);
+    auto squared_error = torch::pow(img1 - img2, 2).masked_select(valid);
+    auto mse = squared_error.mean();
+    return 10.0f * torch::log10(1.0f / mse);
+}
+
 /** def psnr(img1, img2):
  *     mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
  *     return 20 * torch.log10(1.0 / torch.sqrt(mse))
@@ -83,7 +92,8 @@ inline torch::Tensor _ssim(
     torch::autograd::Variable &window,
     int window_size,
     int64_t channel,
-    bool size_average = true)
+    bool size_average = true,
+    const torch::Tensor& mask = torch::Tensor())
 {
     int window_size_half = window_size / 2;
     auto mu1 = torch::nn::functional::conv2d(img1, window, torch::nn::functional::Conv2dFuncOptions().padding(window_size_half).groups(channel));
@@ -106,9 +116,26 @@ inline torch::Tensor _ssim(
     auto ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2));
 
     if (size_average)
+    {
+        if (mask.defined())
+        {
+            auto weights = mask.to(ssim_map.device()).to(ssim_map.dtype())
+                .unsqueeze(0).expand_as(ssim_map);
+            return (ssim_map * weights).sum() / weights.sum().clamp_min(1.0f);
+        }
         return ssim_map.mean();
+    }
     else
         return ssim_map.mean(1).mean(1).mean(1);
+}
+
+inline torch::Tensor ssim_masked(
+    torch::Tensor &img1, torch::Tensor &img2, torch::Tensor &mask,
+    torch::DeviceType device_type = torch::kCUDA, int window_size = 11)
+{
+    auto channel = img1.size(-3);
+    auto window = create_window(window_size, channel, device_type).type_as(img1);
+    return _ssim(img1, img2, window, window_size, channel, true, mask);
 }
 
 inline torch::Tensor ssim(

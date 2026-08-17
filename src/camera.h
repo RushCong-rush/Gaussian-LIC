@@ -35,6 +35,11 @@ class Camera
 public:
     Camera(){}
 
+    void setCameraModel(bool equirectangular)
+    {
+        is_equirectangular_ = equirectangular;
+    }
+
     void setIntrinsic(double w, double h, 
                       double fx, double fy,
                       double cx, double cy)
@@ -121,6 +126,7 @@ public:
     float fy_;
     float cx_; 
     float cy_;   
+    bool is_equirectangular_ = false;
     float FoVx_; 
     float FoVy_;
 

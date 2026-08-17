@@ -155,6 +155,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     torch::jit::setGraphExecutorOptimize(false);
 
     Params prm(node);
+    std::cout << "        [SH Degree] " << prm.sh_degree << std::endl;
     std::shared_ptr<GaussianModel> gaussians = std::make_shared<GaussianModel>(prm);
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
 
@@ -246,6 +247,16 @@ int main(int argc, char** argv)
     std::string config_path;
     nh.param<std::string>("config_path", config_path, "");
     YAML::Node config_node = YAML::LoadFile(config_path);
+    int sh_degree_override;
+    if (nh.getParam("sh_degree", sh_degree_override))
+    {
+        if (sh_degree_override < 0 || sh_degree_override > 3)
+        {
+            ROS_FATAL_STREAM("sh_degree must be between 0 and 3, got " << sh_degree_override);
+            return 2;
+        }
+        config_node["sh_degree"] = sh_degree_override;
+    }
     std::string result_path;
     nh.param<std::string>("result_path", result_path, "");
     std::string lpips_path;

@@ -51,6 +51,7 @@ void ADAM::adamUpdate(
     const uint32_t M) {
 
     const uint32_t cnt = N * M;
+    if (cnt == 0) return;
     adamUpdateCUDA<<<(cnt + 255) / 256, 256>>> (
         param,
         param_grad,

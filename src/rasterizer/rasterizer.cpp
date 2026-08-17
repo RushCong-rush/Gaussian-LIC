@@ -57,7 +57,8 @@ GaussianRasterizerFunction::forward(
         raster_settings.campos_,
         raster_settings.prefiltered_,
         raster_settings.debug_,
-        raster_settings.no_color_
+        raster_settings.no_color_,
+        raster_settings.equirectangular_
     );
     auto num_rendered = std::get<0>(rasterization_result);
     auto num_buckets = std::get<1>(rasterization_result);
@@ -81,6 +82,7 @@ GaussianRasterizerFunction::forward(
     ctx->saved_data["limy_neg"] = raster_settings.limy_neg_;
     ctx->saved_data["limy_pos"] = raster_settings.limy_pos_;
     ctx->saved_data["lambda_erank"] = raster_settings.lambda_erank_;
+    ctx->saved_data["equirectangular"] = raster_settings.equirectangular_;
     ctx->save_for_backward({raster_settings.bg_,
                             raster_settings.viewmatrix_,
                             raster_settings.projmatrix_,
@@ -105,6 +107,7 @@ GaussianRasterizerFunction::backward(
     torch::autograd::AutogradContext *ctx,
     torch::autograd::tensor_list grad_outputs)
 {
+    auto equirectangular = ctx->saved_data["equirectangular"].toBool();
     auto num_rendered = ctx->saved_data["num_rendered"].toInt();
     auto num_buckets = ctx->saved_data["num_buckets"].toInt();
     auto scale_modifier = static_cast<float>(ctx->saved_data["scale_modifier"].toDouble());
@@ -168,7 +171,8 @@ GaussianRasterizerFunction::backward(
         num_buckets,
         sampleBuffer,
         lambda_erank,
-        false
+        false,
+        equirectangular
     );
 
     return {

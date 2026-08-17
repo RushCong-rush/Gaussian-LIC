@@ -10,7 +10,7 @@ depth_completion: true
 patch_size: 10
 max_depth: 20
 
-sh_degree: 3
+sh_degree: 1
 white_background: false  # no adjustment needed
 random_background: false  # no adjustment needed
 convert_SHs_python: false  # no adjustment needed

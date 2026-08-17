@@ -54,11 +54,23 @@ class Dataset
 public:
     Dataset(const Params& prm)
       : fx_(prm.fx), fy_(prm.fy), cx_(prm.cx), cy_(prm.cy),
+        equirectangular_(prm.equirectangular),
         select_every_k_frame_(prm.select_every_k_frame),
         depth_completion_(prm.depth_completion),
         patch_size_(prm.patch_size), max_depth_(prm.max_depth),
         all_frame_num_(0), is_keyframe_current_(false)
     {
+        if (!prm.metric_mask_path.empty())
+        {
+            cv::Mat mask = cv::imread(prm.metric_mask_path, cv::IMREAD_GRAYSCALE);
+            if (mask.empty())
+                throw std::runtime_error("Cannot read metric mask: " + prm.metric_mask_path);
+            if (mask.cols != prm.width || mask.rows != prm.height)
+                throw std::runtime_error("Metric mask size does not match configured image size: " + prm.metric_mask_path);
+            cv::Mat mask_float;
+            mask.convertTo(mask_float, CV_32FC1, 1.0 / 255.0);
+            metric_mask_ = tensor_utils::cvMat2TorchTensor_Float32(mask_float, torch::kCPU).gt(0.5);
+        }
         if (depth_completion_)
             depth_completer_ = std::make_unique<DepthCompleter>(prm.engine_path, prm.width, prm.height);
     }
@@ -70,11 +82,13 @@ public:
     double fy_;
     double cx_;
     double cy_;
+    bool equirectangular_;
 
     int select_every_k_frame_;
     bool depth_completion_;
     int patch_size_;
     double max_depth_;
+    torch::Tensor metric_mask_;
 
 
     int all_frame_num_;

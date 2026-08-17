@@ -110,7 +110,8 @@ namespace FORWARD
 		const dim3 grid,
 		uint32_t* tiles_touched,
 		bool prefiltered, 
-		bool no_color);
+		bool no_color,
+		bool equirectangular);
 
 	// Main rasterization method.
 	void render(
@@ -130,7 +131,8 @@ namespace FORWARD
 		float* out_color,
 		float* out_final_T,
 		float* out_depth,
-		bool no_color);
+		bool no_color,
+		bool equirectangular);
 }
 
 

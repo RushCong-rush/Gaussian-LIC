@@ -22,6 +22,8 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+constexpr float ERP_PI = 3.14159265358979323846f;
+
 // #define DEPTH_GRAD
 
 __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* dc, const float* shs, const bool* clamped, const glm::vec3* dL_dcolor, glm::vec3* dL_dmeans, glm::vec3* dL_ddc, glm::vec3* dL_dshs)
@@ -256,6 +258,153 @@ __global__ void computeCov2DCUDA(int P,
 	dL_dmeans[idx] = dL_dmean;
 }
 
+__device__ float matrixDot(const glm::mat3& first, const glm::mat3& second)
+{
+	float result = 0.0f;
+	#pragma unroll
+	for (int column = 0; column < 3; ++column)
+	{
+		#pragma unroll
+		for (int row = 0; row < 3; ++row)
+			result += first[column][row] * second[column][row];
+	}
+	return result;
+}
+
+__device__ float3 erpCoordinateGradient(
+	const float3& point_camera, const float dL_dlongitude,
+	const float dL_dlatitude, const float dL_ddistance)
+{
+	const float distance2 = max(
+		point_camera.x * point_camera.x + point_camera.y * point_camera.y + point_camera.z * point_camera.z,
+		1.0e-8f);
+	const float distance = sqrtf(distance2);
+	const float rho2 = max(point_camera.x * point_camera.x + point_camera.z * point_camera.z, 1.0e-8f);
+	const float rho = sqrtf(rho2);
+
+	return {
+		dL_dlongitude * point_camera.z / rho2
+			+ dL_dlatitude * point_camera.x * point_camera.y / (distance2 * rho)
+			+ dL_ddistance * point_camera.x / distance,
+		-dL_dlatitude * rho / distance2
+			+ dL_ddistance * point_camera.y / distance,
+		-dL_dlongitude * point_camera.x / rho2
+			+ dL_dlatitude * point_camera.z * point_camera.y / (distance2 * rho)
+			+ dL_ddistance * point_camera.z / distance};
+}
+
+__global__ void computeErpCov2DCUDA(
+	int P, int W, int H,
+	const float3* means,
+	const int* radii,
+	const float* cov3Ds,
+	const float* view_matrix,
+	const float* dL_dconics,
+	const float* dL_ddepth,
+	float3* dL_dmeans,
+	float* dL_dcov)
+{
+	const int idx = cg::this_grid().thread_rank();
+	if (idx >= P || radii[idx] <= 0)
+		return;
+
+	const float3 point_camera = transformPoint4x3(means[idx], view_matrix);
+	const float distance = sqrtf(
+		point_camera.x * point_camera.x + point_camera.y * point_camera.y + point_camera.z * point_camera.z);
+	const float rho = hypotf(point_camera.x, point_camera.z);
+	const float longitude = atan2f(point_camera.x, point_camera.z);
+	const float latitude = atan2f(-point_camera.y, rho);
+	const float cosine_latitude = fabsf(cosf(latitude));
+	const float safe_cosine = max(cosine_latitude, 1.0e-4f);
+	const float safe_distance = max(distance, 1.0e-4f);
+	const float x_scale = W / (2.0f * ERP_PI);
+	const float y_scale = H / ERP_PI;
+	const float longitude_scale = x_scale / (safe_cosine * safe_distance);
+	const float latitude_scale = y_scale / safe_distance;
+
+	glm::mat3 spherical_scale = glm::mat3(
+		longitude_scale, 0.0f, 0.0f,
+		0.0f, latitude_scale, 0.0f,
+		0.0f, 0.0f, 0.0f);
+	glm::mat3 tangent_basis = glm::mat3(
+		cosf(longitude), 0.0f, -sinf(longitude),
+		sinf(latitude) * sinf(longitude), cosf(latitude), sinf(latitude) * cosf(longitude),
+		cosf(latitude) * sinf(longitude), -sinf(latitude), cosf(latitude) * cosf(longitude));
+	glm::mat3 world_to_camera = glm::mat3(
+		view_matrix[0], view_matrix[4], view_matrix[8],
+		view_matrix[1], view_matrix[5], view_matrix[9],
+		view_matrix[2], view_matrix[6], view_matrix[10]);
+	glm::mat3 projection_jacobian = world_to_camera * tangent_basis * spherical_scale;
+
+	const float* covariance = cov3Ds + 6 * idx;
+	glm::mat3 covariance_3d = glm::mat3(
+		covariance[0], covariance[1], covariance[2],
+		covariance[1], covariance[3], covariance[4],
+		covariance[2], covariance[4], covariance[5]);
+	glm::mat3 covariance_2d = glm::transpose(projection_jacobian) * covariance_3d * projection_jacobian;
+	const float a = covariance_2d[0][0] + 0.3f;
+	const float b = covariance_2d[0][1];
+	const float c = covariance_2d[1][1] + 0.3f;
+	const float determinant = a * c - b * b;
+	const float inverse_determinant_squared = 1.0f / (determinant * determinant + 1.0e-7f);
+	const float3 dL_dconic = {
+		dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3]};
+	const float dL_da = inverse_determinant_squared * (
+		-c * c * dL_dconic.x + 2.0f * b * c * dL_dconic.y
+		+ (determinant - a * c) * dL_dconic.z);
+	const float dL_dc = inverse_determinant_squared * (
+		-a * a * dL_dconic.z + 2.0f * a * b * dL_dconic.y
+		+ (determinant - a * c) * dL_dconic.x);
+	const float dL_db = inverse_determinant_squared * 2.0f * (
+		b * c * dL_dconic.x - (determinant + 2.0f * b * b) * dL_dconic.y
+		+ a * b * dL_dconic.z);
+
+	glm::mat3 dL_dcovariance_2d(0.0f);
+	dL_dcovariance_2d[0][0] = dL_da;
+	dL_dcovariance_2d[0][1] = 0.5f * dL_db;
+	dL_dcovariance_2d[1][0] = 0.5f * dL_db;
+	dL_dcovariance_2d[1][1] = dL_dc;
+
+	const glm::mat3 dL_dcovariance_3d =
+		projection_jacobian * dL_dcovariance_2d * glm::transpose(projection_jacobian);
+	dL_dcov[6 * idx] = dL_dcovariance_3d[0][0];
+	dL_dcov[6 * idx + 1] = dL_dcovariance_3d[0][1] + dL_dcovariance_3d[1][0];
+	dL_dcov[6 * idx + 2] = dL_dcovariance_3d[0][2] + dL_dcovariance_3d[2][0];
+	dL_dcov[6 * idx + 3] = dL_dcovariance_3d[1][1];
+	dL_dcov[6 * idx + 4] = dL_dcovariance_3d[1][2] + dL_dcovariance_3d[2][1];
+	dL_dcov[6 * idx + 5] = dL_dcovariance_3d[2][2];
+
+	const glm::mat3 dL_dprojection_jacobian =
+		2.0f * covariance_3d * projection_jacobian * dL_dcovariance_2d;
+	const glm::mat3 dL_dtangent_basis =
+		glm::transpose(world_to_camera) * dL_dprojection_jacobian * glm::transpose(spherical_scale);
+	const glm::mat3 dL_dspherical_scale =
+		glm::transpose(tangent_basis) * glm::transpose(world_to_camera) * dL_dprojection_jacobian;
+
+	glm::mat3 tangent_longitude = glm::mat3(
+		-sinf(longitude), 0.0f, -cosf(longitude),
+		sinf(latitude) * cosf(longitude), 0.0f, -sinf(latitude) * sinf(longitude),
+		cosf(latitude) * cosf(longitude), 0.0f, -cosf(latitude) * sinf(longitude));
+	glm::mat3 tangent_latitude = glm::mat3(
+		0.0f, 0.0f, 0.0f,
+		cosf(latitude) * sinf(longitude), -sinf(latitude), cosf(latitude) * cosf(longitude),
+		-sinf(latitude) * sinf(longitude), -cosf(latitude), -sinf(latitude) * cosf(longitude));
+
+	float dL_dlongitude = matrixDot(dL_dtangent_basis, tangent_longitude);
+	float dL_dlatitude = matrixDot(dL_dtangent_basis, tangent_latitude);
+	const float dL_dlongitude_scale = dL_dspherical_scale[0][0];
+	const float dL_dlatitude_scale = dL_dspherical_scale[1][1];
+	float dL_ddistance = -(
+		dL_dlongitude_scale * longitude_scale + dL_dlatitude_scale * latitude_scale) / safe_distance;
+	if (cosine_latitude > 1.0e-4f)
+		dL_dlatitude += dL_dlongitude_scale * longitude_scale * tanf(latitude);
+	dL_ddistance += dL_ddepth[idx];
+
+	const float3 dL_dpoint_camera = erpCoordinateGradient(
+		point_camera, dL_dlongitude, dL_dlatitude, dL_ddistance);
+	dL_dmeans[idx] = transformVec4x3Transpose(dL_dpoint_camera, view_matrix);
+}
+
 __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const glm::vec4 rot, const float* dL_dcov3Ds, glm::vec3* dL_dscales, glm::vec4* dL_drots)
 {
 	glm::mat3 S = glm::mat3(1.0f);
@@ -314,6 +463,7 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 template<int C>
 __global__ void preprocessCUDA(
 	int P, int D, int M,
+	int W, int H,
 	const float3* means,
 	const int* radii,
 	const float* dc,
@@ -333,21 +483,37 @@ __global__ void preprocessCUDA(
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot,
-	const float lambda_erank) 
+	const float lambda_erank,
+	bool equirectangular)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P || !(radii[idx] > 0)) return;
 
-	float3 p_orig = means[idx];
-	float4 p_hom = transformPoint4x4(p_orig, proj);
-	float p_w = 1.0f / (p_hom.w + 0.0000001f);
-
 	glm::vec3 dL_dmean;
-	float mul1 = (proj[0] * p_orig.x + proj[4] * p_orig.y + proj[8] * p_orig.z + proj[12]) * p_w * p_w;
-	float mul2 = (proj[1] * p_orig.x + proj[5] * p_orig.y + proj[9] * p_orig.z + proj[13]) * p_w * p_w;
-	dL_dmean.x = (proj[0] * p_w - proj[3] * mul1) * dL_dmean2D[idx].x + (proj[1] * p_w - proj[3] * mul2) * dL_dmean2D[idx].y;
-	dL_dmean.y = (proj[4] * p_w - proj[7] * mul1) * dL_dmean2D[idx].x + (proj[5] * p_w - proj[7] * mul2) * dL_dmean2D[idx].y;
-	dL_dmean.z = (proj[8] * p_w - proj[11] * mul1) * dL_dmean2D[idx].x + (proj[9] * p_w - proj[11] * mul2) * dL_dmean2D[idx].y;
+	if (equirectangular)
+	{
+		const float3 point_camera = transformPoint4x3(means[idx], view_matrix);
+		const float dL_dlongitude = dL_dmean2D[idx].x / ERP_PI;
+		const float dL_dlatitude = -2.0f * dL_dmean2D[idx].y / ERP_PI;
+		const float3 dL_dpoint_camera = erpCoordinateGradient(
+			point_camera, dL_dlongitude, dL_dlatitude, 0.0f);
+		const float3 dL_dpoint_world = transformVec4x3Transpose(dL_dpoint_camera, view_matrix);
+		dL_dmean = glm::vec3(dL_dpoint_world.x, dL_dpoint_world.y, dL_dpoint_world.z);
+	}
+	else
+	{
+		const float3 point_world = means[idx];
+		const float4 point_homogeneous = transformPoint4x4(point_world, proj);
+		const float inverse_w = 1.0f / (point_homogeneous.w + 0.0000001f);
+		const float mul1 = point_homogeneous.x * inverse_w * inverse_w;
+		const float mul2 = point_homogeneous.y * inverse_w * inverse_w;
+		dL_dmean.x = (proj[0] * inverse_w - proj[3] * mul1) * dL_dmean2D[idx].x
+			+ (proj[1] * inverse_w - proj[3] * mul2) * dL_dmean2D[idx].y;
+		dL_dmean.y = (proj[4] * inverse_w - proj[7] * mul1) * dL_dmean2D[idx].x
+			+ (proj[5] * inverse_w - proj[7] * mul2) * dL_dmean2D[idx].y;
+		dL_dmean.z = (proj[8] * inverse_w - proj[11] * mul1) * dL_dmean2D[idx].x
+			+ (proj[9] * inverse_w - proj[11] * mul2) * dL_dmean2D[idx].y;
+	}
 
 	dL_dmeans[idx] += dL_dmean;
 
@@ -402,7 +568,8 @@ PerGaussianRenderCUDA(
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
-    float* __restrict__ dL_ddepth) 
+	float* __restrict__ dL_ddepth,
+	bool equirectangular)
 {
 	// global_bucket_idx = warp_idx
 	auto block = cg::this_thread_block();
@@ -558,7 +725,9 @@ PerGaussianRenderCUDA(
 			if (splat_idx_in_tile >= last_contributor) continue;
 
 			// compute blending values
-			const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			float2 d = {xy.x - pixf.x, xy.y - pixf.y};
+			if (equirectangular)
+				d.x = periodicPixelDifference(d.x, W);
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f) continue;
 			const float G = exp(power);
@@ -623,6 +792,7 @@ PerGaussianRenderCUDA(
 
 void BACKWARD::preprocess(
 	int P, int D, int M,
+	int W, int H,
 	const float3* means3D,
 	const int* radii,
 	const float* dc,
@@ -651,29 +821,46 @@ void BACKWARD::preprocess(
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot,
-	const float lambda_erank) 
+	const float lambda_erank,
+	bool equirectangular)
 {
-	computeCov2DCUDA <<<(P + 255) / 256, 256>>> (
-		P,
-		means3D,
-		radii,
-		cov3Ds,
-		focal_x,
-		focal_y,
-		tan_fovx,
-		tan_fovy,
-		limx_neg,
-	    limx_pos,
-	    limy_neg,
-	    limy_pos,
-		viewmatrix,
-		dL_dconic,
-		dL_ddepth,
-		(float3*)dL_dmean3D,
-		dL_dcov3D);
+	if (equirectangular)
+	{
+		computeErpCov2DCUDA <<<(P + 255) / 256, 256>>> (
+			P, W, H,
+			means3D,
+			radii,
+			cov3Ds,
+			viewmatrix,
+			dL_dconic,
+			dL_ddepth,
+			(float3*)dL_dmean3D,
+			dL_dcov3D);
+	}
+	else
+	{
+		computeCov2DCUDA <<<(P + 255) / 256, 256>>> (
+			P,
+			means3D,
+			radii,
+			cov3Ds,
+			focal_x,
+			focal_y,
+			tan_fovx,
+			tan_fovy,
+			limx_neg,
+			limx_pos,
+			limy_neg,
+			limy_pos,
+			viewmatrix,
+			dL_dconic,
+			dL_ddepth,
+			(float3*)dL_dmean3D,
+			dL_dcov3D);
+	}
 
 	preprocessCUDA<NUM_CHAFFELS> <<<(P + 255) / 256, 256>>> (
-		P, D, M,
+		P, D, M, W, H,
 		(float3*)means3D,
 		radii,
 		dc,
@@ -693,7 +880,8 @@ void BACKWARD::preprocess(
 		dL_dsh,
 		dL_dscale,
 		dL_drot,
-		lambda_erank);
+		lambda_erank,
+		equirectangular);
 }
 
 void BACKWARD::render(
@@ -719,7 +907,8 @@ void BACKWARD::render(
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
-    float* dL_ddepth) 
+	    float* dL_ddepth,
+	bool equirectangular)
 {
 	const int THREADS = 32;
 	PerGaussianRenderCUDA<NUM_CHAFFELS> <<<((B*32) + THREADS - 1), THREADS>>>(
@@ -744,8 +933,9 @@ void BACKWARD::render(
 		dL_dpix_depth,
 		dL_dmean2D,
 		dL_dconic2D,
-		dL_dopacity,
-		dL_dcolors,
-		dL_ddepth
-		);
+			dL_dopacity,
+			dL_dcolors,
+			dL_ddepth,
+			equirectangular
+			);
 }

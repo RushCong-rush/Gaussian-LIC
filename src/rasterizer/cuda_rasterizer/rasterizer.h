@@ -57,7 +57,8 @@ namespace CudaRasterizer {
 			float* out_depth,
 			int* radii = nullptr,
 			bool debug = false,
-			bool no_color = false);
+			bool no_color = false,
+			bool equirectangular = false);
 
 		static void backward(
 			const int P, int D, int M, int R, int B,
@@ -98,7 +99,8 @@ namespace CudaRasterizer {
 			float* dL_drot,
 			float* dL_ddepth,
 			const float lambda_erank,
-			bool debug);
+			bool debug,
+			bool equirectangular = false);
 	};
 };
 

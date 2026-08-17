@@ -72,7 +72,7 @@ RasterizeGaussiansCUDA(
     const int degree,
     const torch::Tensor& campos,
     const bool prefiltered,
-    const bool debug, const bool no_color) 
+    const bool debug, const bool no_color, const bool equirectangular)
 {
     if (means3D.ndimension() != 2 || means3D.size(1) != 3) 
     { 
@@ -141,7 +141,7 @@ RasterizeGaussiansCUDA(
             out_final_T.contiguous().data<float>(),
             out_depth.contiguous().data<float>(),
             radii.contiguous().data<int>(),
-            debug, no_color);
+            debug, no_color, equirectangular);
             
         rendered = std::get<0>(tup);
         num_buckets = std::get<1>(tup);
@@ -181,7 +181,8 @@ RasterizeGaussiansBackwardCUDA(
     const int B,
     const torch::Tensor& sampleBuffer,
     const float lambda_erank,
-    const bool debug) 
+    const bool debug,
+    const bool equirectangular)
 {
     const int P = means3D.size(0);
     const int H = dL_dout_color.size(1);
@@ -245,7 +246,8 @@ RasterizeGaussiansBackwardCUDA(
             dL_drotations.contiguous().data<float>(),
             dL_ddepth.contiguous().data<float>(),
             lambda_erank,
-            debug);
+            debug,
+            equirectangular);
     }
 
     return std::make_tuple(dL_dmeans2D, dL_dcolors_precomp, dL_dopacities, dL_dmeans3D, dL_dcov3Ds_precomp, dL_ddc, dL_dsh, dL_dscales, dL_drotations);

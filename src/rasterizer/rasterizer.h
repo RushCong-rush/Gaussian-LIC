@@ -44,12 +44,14 @@ struct GaussianRasterizationSettings
         bool prefiltered,
         bool debug,
         bool no_color,
-        float lambda_erank)
+        float lambda_erank,
+        bool equirectangular = false)
         : image_height_(image_height), image_width_(image_width), tanfovx_(tanfovx), tanfovy_(tanfovy),
           limx_neg_(limx_neg), limx_pos_(limx_pos), limy_neg_(limy_neg), limy_pos_(limy_pos),
           bg_(bg), scale_modifier_(scale_modifier), viewmatrix_(viewmatrix), projmatrix_(projmatrix),
           sh_degree_(sh_degree), campos_(campos), prefiltered_(prefiltered), debug_(debug), 
-          no_color_(no_color), lambda_erank_(lambda_erank)
+          no_color_(no_color), lambda_erank_(lambda_erank),
+          equirectangular_(equirectangular)
     {}
 
     int image_height_;
@@ -70,6 +72,7 @@ struct GaussianRasterizationSettings
     bool debug_;
     bool no_color_;
     float lambda_erank_;
+    bool equirectangular_;
 };
 
 class GaussianRasterizerFunction : public torch::autograd::Function<GaussianRasterizerFunction>

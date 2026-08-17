@@ -55,6 +55,51 @@ __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& r
 	};
 }
 
+__forceinline__ __device__ float periodicPixelDifference(float difference, int width)
+{
+	return difference - nearbyintf(difference / static_cast<float>(width)) * width;
+}
+
+__forceinline__ __device__ int getErpRects(
+	const float2 p, int max_radius, int width, dim3 grid,
+	uint2& rect_min_0, uint2& rect_max_0,
+	uint2& rect_min_1, uint2& rect_max_1)
+{
+	uint2 clamped_min, clamped_max;
+	getRect(p, max_radius, clamped_min, clamped_max, grid);
+	rect_min_0 = clamped_min;
+	rect_max_0 = clamped_max;
+	rect_min_1 = {0, clamped_min.y};
+	rect_max_1 = {0, clamped_max.y};
+
+	if (2 * max_radius >= width)
+	{
+		rect_min_0.x = 0;
+		rect_max_0.x = grid.x;
+		return 1;
+	}
+
+	const float left = p.x - max_radius;
+	const float right = p.x + max_radius;
+	if (left < 0.0f)
+	{
+		rect_min_0.x = 0;
+		rect_max_0.x = min(grid.x, static_cast<unsigned int>(ceilf(right / BLOCK_X)));
+		rect_min_1.x = min(grid.x, static_cast<unsigned int>(floorf((left + width) / BLOCK_X)));
+		rect_max_1.x = grid.x;
+		return 2;
+	}
+	if (right >= width)
+	{
+		rect_min_0.x = min(grid.x, static_cast<unsigned int>(floorf(left / BLOCK_X)));
+		rect_max_0.x = grid.x;
+		rect_min_1.x = 0;
+		rect_max_1.x = min(grid.x, static_cast<unsigned int>(ceilf((right - width) / BLOCK_X)));
+		return 2;
+	}
+	return 1;
+}
+
 __forceinline__ __device__ void getRect(const float2 p, int2 ext_rect, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {

@@ -50,7 +50,8 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
         prefiltered,
         debug,
         no_color,
-        pc->lambda_erank_
+        pc->lambda_erank_,
+        viewpoint_camera->is_equirectangular_
     );
     GaussianRasterizer rasterizer(raster_settings);
 
