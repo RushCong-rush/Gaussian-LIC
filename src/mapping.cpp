@@ -35,10 +35,12 @@ std::queue<sensor_msgs::PointCloud2ConstPtr> point_buf;
 std::queue<geometry_msgs::PoseStampedConstPtr> pose_buf;
 std::queue<sensor_msgs::ImageConstPtr> image_buf;
 std::queue<sensor_msgs::ImageConstPtr> depth_buf;
+std::queue<sensor_msgs::ImageConstPtr> dap_depth_buf;
 
 std::atomic<bool> exit_flag(false);
 std::atomic<double> last_point_time(0.0);
 std::atomic<bool> gaussians_initialized(false);
+std::atomic<bool> online_dap_enabled(false);
 
 void pointCallback(const sensor_msgs::PointCloud2ConstPtr& point_msg) 
 {
@@ -69,9 +71,16 @@ void depthCallback(const sensor_msgs::ImageConstPtr& depth_msg)
     m_buf.unlock();
 }
 
+void dapDepthCallback(const sensor_msgs::ImageConstPtr& depth_msg)
+{
+    m_buf.lock();
+    dap_depth_buf.push(depth_msg);
+    m_buf.unlock();
+}
+
 bool getAlignedData(Frame& cur_frame)
 {
-    if (point_buf.empty() || pose_buf.empty() || image_buf.empty() || depth_buf.empty()) 
+    if (point_buf.empty() || pose_buf.empty() || image_buf.empty() || depth_buf.empty())
     {
         return false;
     }
@@ -114,22 +123,41 @@ bool getAlignedData(Frame& cur_frame)
         return false;
     }
 
-    while (1) 
+    while (1)
     {
-        if (depth_buf.front()->header.stamp.toSec() < frame_time - 0.01) 
+        if (depth_buf.front()->header.stamp.toSec() < frame_time - 0.01)
         {
             depth_buf.pop();
-            if (depth_buf.empty()) 
-            {
-                return false;
-            }
-        } 
+            if (depth_buf.empty()) return false;
+        }
         else break;
     }
-    if (depth_buf.front()->header.stamp.toSec() > frame_time + 0.01) 
+    if (depth_buf.front()->header.stamp.toSec() > frame_time + 0.01)
     {
         point_buf.pop();
         return false;
+    }
+
+    // The DAP image is produced asynchronously. It is required only for the
+    // online ERP path; the perspective and offline-depth paths keep the
+    // original four-stream alignment.
+    if (online_dap_enabled)
+    {
+        if (dap_depth_buf.empty()) return false;
+        while (1)
+        {
+            if (dap_depth_buf.front()->header.stamp.toSec() < frame_time - 0.01)
+            {
+                dap_depth_buf.pop();
+                if (dap_depth_buf.empty()) return false;
+            }
+            else break;
+        }
+        if (dap_depth_buf.front()->header.stamp.toSec() > frame_time + 0.01)
+        {
+            point_buf.pop();
+            return false;
+        }
     }
 
     auto cur_point = point_buf.front();
@@ -141,11 +169,13 @@ bool getAlignedData(Frame& cur_frame)
     cur_frame.pose_msg = cur_pose;
     cur_frame.image_msg = cur_image;
     cur_frame.depth_msg = cur_depth;
+    cur_frame.dap_depth_msg = online_dap_enabled ? dap_depth_buf.front() : sensor_msgs::ImageConstPtr();
 
     point_buf.pop();
     pose_buf.pop();
     image_buf.pop();
     depth_buf.pop();
+    if (online_dap_enabled) dap_depth_buf.pop();
 
     return true;
 }
@@ -155,9 +185,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     torch::jit::setGraphExecutorOptimize(false);
 
     Params prm(node);
+    online_dap_enabled = prm.online_dap;
     std::cout << "        [SH Degree] " << prm.sh_degree << std::endl;
     std::shared_ptr<GaussianModel> gaussians = std::make_shared<GaussianModel>(prm);
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
+    dataset->setDiagnosisDirectory(result_path + "/depth_diagnose");
 
     std::chrono::steady_clock::time_point t_start, t_end;
     double total_mapping_time = 0;
@@ -243,10 +275,15 @@ int main(int argc, char** argv)
     ros::Subscriber sub_pose = nh.subscribe("/pose_for_gs", 10000, poseCallback);
     image_transport::Subscriber image_sub = it_.subscribe("/image_for_gs", 10000, imageCallback);
     image_transport::Subscriber depth_sub = it_.subscribe("/depth_for_gs", 10000, depthCallback);
+    image_transport::Subscriber dap_depth_sub;
 
     std::string config_path;
     nh.param<std::string>("config_path", config_path, "");
     YAML::Node config_node = YAML::LoadFile(config_path);
+    online_dap_enabled = config_node["online_dap"] ? config_node["online_dap"].as<bool>() : false;
+    std::string dap_topic = config_node["dap_topic"] ? config_node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
+    if (online_dap_enabled)
+        dap_depth_sub = it_.subscribe(dap_topic, 100, dapDepthCallback);
     int sh_degree_override;
     if (nh.getParam("sh_degree", sh_degree_override))
     {

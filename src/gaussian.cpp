@@ -119,45 +119,13 @@ void Dataset::addFrame(Frame& cur_frame)
     dp_ptr = cv_bridge::toCvCopy(cur_frame.depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
     cv::Mat lidar_depth = dp_ptr->image.clone();  // metric float32, sparse LiDAR measurements
     cv::Mat depth_map = lidar_depth.clone();
-    if (!external_depth_dir_.empty())
+    if (cur_frame.dap_depth_msg)
     {
-        const int64_t image_stamp_ns = cur_frame.image_msg->header.stamp.toNSec();
-        const fs::path depth_dir = fs::path(external_depth_dir_) / "depth_mm16";
-        fs::path depth_file = depth_dir / (std::to_string(image_stamp_ns) + ".png");
-        if (!fs::exists(depth_file))
-        {
-            // Coco-LIC reconstructs the published stamp through floating-point
-            // seconds. Match only the same frame within a 1 ms timestamp window.
-            int64_t best_delta_ns = 1000001;
-            for (const auto& entry : fs::directory_iterator(depth_dir))
-            {
-                if (!entry.is_regular_file() || entry.path().extension() != ".png") continue;
-                const int64_t candidate_ns = std::stoll(entry.path().stem().string());
-                const int64_t delta_ns = std::llabs(candidate_ns - image_stamp_ns);
-                if (delta_ns < best_delta_ns)
-                {
-                    best_delta_ns = delta_ns;
-                    depth_file = entry.path();
-                }
-            }
-            if (best_delta_ns > 1000000)
-                depth_file.clear();
-        }
-        const std::string depth_path = depth_file.string();
-        cv::Mat external_depth_mm = depth_file.empty() ? cv::Mat() : cv::imread(depth_path, cv::IMREAD_UNCHANGED);
-        if (external_depth_mm.empty() || external_depth_mm.type() != CV_16UC1)
-        {
-            std::cerr << "[ExternalDepth] invalid file: " << depth_path
-                      << " type=" << (external_depth_mm.empty() ? -1 : external_depth_mm.type())
-                      << std::endl;
-            throw std::runtime_error("Cannot read external ERP depth: " + depth_path);
-        }
-        std::cerr << "[ExternalDepth] " << depth_path << " "
-                  << external_depth_mm.cols << "x" << external_depth_mm.rows << std::endl;
         cv::Mat dap_depth;
-        external_depth_mm.convertTo(dap_depth, CV_32FC1, 0.001);
+        auto dap_ptr = cv_bridge::toCvCopy(cur_frame.dap_depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
+        dap_depth = dap_ptr->image.clone();
         if (dap_depth.size() != depth_map.size())
-            throw std::runtime_error("External ERP depth size does not match the input image");
+            throw std::runtime_error("DAP ERP depth size does not match the input image");
 
         // Align the offline DAP metric to the current LiDAR scale, then keep
         // measured LiDAR pixels as hard anchors in the fused depth image.
@@ -184,6 +152,24 @@ void Dataset::addFrame(Frame& cur_frame)
             std::cout << std::fixed << std::setprecision(4)
                       << "[DepthFusion] DAP scale " << dap_scale
                       << ", LiDAR anchors " << scale_ratios.size() << std::endl;
+
+        if (!diagnosis_dir_.empty() && equirectangular_ && (all_frame_num_ % (select_every_k_frame_ * 5) == 0))
+        {
+            fs::create_directories(diagnosis_dir_);
+            auto colorize = [](const cv::Mat& depth, double max_depth) {
+                cv::Mat clipped;
+                cv::max(depth, 0.0, clipped);
+                cv::min(clipped, max_depth, clipped);
+                clipped.convertTo(clipped, CV_8UC1, 255.0 / max_depth);
+                cv::Mat colored;
+                cv::applyColorMap(clipped, colored, cv::COLORMAP_TURBO);
+                colored.setTo(cv::Scalar(0, 0, 0), depth <= 0.0f);
+                return colored;
+            };
+            const std::string stamp = std::to_string(cur_frame.image_msg->header.stamp.toNSec());
+            cv::imwrite(diagnosis_dir_ + "/dap_" + stamp + ".png", colorize(dap_depth, 80.0));
+            cv::imwrite(diagnosis_dir_ + "/fused_" + stamp + ".png", colorize(depth_map, 80.0));
+        }
     }
 
     /// pose
@@ -270,7 +256,7 @@ void Dataset::addFrame(Frame& cur_frame)
                 // std::cout << "[bef vs aft diff]: " << mean_depth_difference << " m" << std::endl;
             }
         }
-        else if (!external_depth_dir_.empty() && equirectangular_)
+        else if (cur_frame.dap_depth_msg && equirectangular_)
         {
             // Use the fused depth only in LiDAR blind patches. This preserves
             // the original sparse LiDAR initialization while adding a small,

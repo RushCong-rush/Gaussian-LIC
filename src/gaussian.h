@@ -58,7 +58,6 @@ public:
         select_every_k_frame_(prm.select_every_k_frame),
         depth_completion_(prm.depth_completion),
         patch_size_(prm.patch_size), max_depth_(prm.max_depth),
-        external_depth_dir_(prm.external_depth_dir),
         all_frame_num_(0), is_keyframe_current_(false)
     {
         if (!prm.metric_mask_path.empty())
@@ -77,6 +76,7 @@ public:
     }
         
     void addFrame(Frame& cur_frame);
+    void setDiagnosisDirectory(const std::string& path) { diagnosis_dir_ = path; }
 
 public:
     double fx_;
@@ -89,7 +89,7 @@ public:
     bool depth_completion_;
     int patch_size_;
     double max_depth_;
-    std::string external_depth_dir_;
+    std::string diagnosis_dir_;
     torch::Tensor metric_mask_;
 
 

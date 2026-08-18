@@ -72,7 +72,8 @@ public:
         depth_completion = node["depth_completion"].as<bool>();
         patch_size = node["patch_size"].as<int>();
         max_depth = node["max_depth"].as<double>();
-        external_depth_dir = node["external_depth_dir"] ? node["external_depth_dir"].as<std::string>() : "";
+        online_dap = node["online_dap"] ? node["online_dap"].as<bool>() : false;
+        dap_topic = node["dap_topic"] ? node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
         std::string pkg_path = ros::package::getPath("gaussian_lic");
         if (height == 512 && width == 640) engine_path = pkg_path + "/ckpt/spnet_512_640.engine";
         if (height == 480 && width == 640) engine_path = pkg_path + "/ckpt/spnet_480_640.engine";
@@ -117,7 +118,8 @@ public:
     bool depth_completion;
     int patch_size;
     double max_depth;
-    std::string external_depth_dir;
+    bool online_dap;
+    std::string dap_topic;
     std::string engine_path;
 
     /// gaussian
@@ -152,4 +154,5 @@ struct Frame
     geometry_msgs::PoseStampedConstPtr pose_msg;
     sensor_msgs::ImageConstPtr image_msg;
     sensor_msgs::ImageConstPtr depth_msg;
+    sensor_msgs::ImageConstPtr dap_depth_msg;
 };
