@@ -6,7 +6,7 @@ cx: 512.0
 cy: 256.0
 camera_model: equirectangular
 metric_mask_path: /datasets/hilti_oxford_2022/exp14_basement_2/panorama_coincident_aware/coverage_mask.png
-external_depth_dir: /datasets/dap_depth/exp14_basement_2_dap_30s_masked
+external_depth_dir: /datasets/dap_depth/exp14_basement_2_dap_full_masked
 
 select_every_k_frame: 5
 depth_completion: false
