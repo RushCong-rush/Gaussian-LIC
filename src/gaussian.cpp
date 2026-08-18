@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <cstdlib>
 #include <torch/script.h>
 #include <memory>
 
@@ -116,7 +117,74 @@ void Dataset::addFrame(Frame& cur_frame)
     /// depth
     cv_bridge::CvImagePtr dp_ptr;
     dp_ptr = cv_bridge::toCvCopy(cur_frame.depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
-    cv::Mat depth_map = dp_ptr->image;  // metric float32
+    cv::Mat lidar_depth = dp_ptr->image.clone();  // metric float32, sparse LiDAR measurements
+    cv::Mat depth_map = lidar_depth.clone();
+    if (!external_depth_dir_.empty())
+    {
+        const int64_t image_stamp_ns = cur_frame.image_msg->header.stamp.toNSec();
+        const fs::path depth_dir = fs::path(external_depth_dir_) / "depth_mm16";
+        fs::path depth_file = depth_dir / (std::to_string(image_stamp_ns) + ".png");
+        if (!fs::exists(depth_file))
+        {
+            // Coco-LIC reconstructs the published stamp through floating-point
+            // seconds. Match only the same frame within a 1 ms timestamp window.
+            int64_t best_delta_ns = 1000001;
+            for (const auto& entry : fs::directory_iterator(depth_dir))
+            {
+                if (!entry.is_regular_file() || entry.path().extension() != ".png") continue;
+                const int64_t candidate_ns = std::stoll(entry.path().stem().string());
+                const int64_t delta_ns = std::llabs(candidate_ns - image_stamp_ns);
+                if (delta_ns < best_delta_ns)
+                {
+                    best_delta_ns = delta_ns;
+                    depth_file = entry.path();
+                }
+            }
+            if (best_delta_ns > 1000000)
+                depth_file.clear();
+        }
+        const std::string depth_path = depth_file.string();
+        cv::Mat external_depth_mm = depth_file.empty() ? cv::Mat() : cv::imread(depth_path, cv::IMREAD_UNCHANGED);
+        if (external_depth_mm.empty() || external_depth_mm.type() != CV_16UC1)
+        {
+            std::cerr << "[ExternalDepth] invalid file: " << depth_path
+                      << " type=" << (external_depth_mm.empty() ? -1 : external_depth_mm.type())
+                      << std::endl;
+            throw std::runtime_error("Cannot read external ERP depth: " + depth_path);
+        }
+        std::cerr << "[ExternalDepth] " << depth_path << " "
+                  << external_depth_mm.cols << "x" << external_depth_mm.rows << std::endl;
+        cv::Mat dap_depth;
+        external_depth_mm.convertTo(dap_depth, CV_32FC1, 0.001);
+        if (dap_depth.size() != depth_map.size())
+            throw std::runtime_error("External ERP depth size does not match the input image");
+
+        // Align the offline DAP metric to the current LiDAR scale, then keep
+        // measured LiDAR pixels as hard anchors in the fused depth image.
+        std::vector<float> scale_ratios;
+        scale_ratios.reserve(static_cast<size_t>(depth_map.total() / 20));
+        for (int y = 0; y < depth_map.rows; ++y)
+        {
+            const float* lidar_row = lidar_depth.ptr<float>(y);
+            const float* dap_row = dap_depth.ptr<float>(y);
+            for (int x = 0; x < depth_map.cols; ++x)
+            {
+                if (lidar_row[x] > 0.0f && dap_row[x] > 0.0f && std::isfinite(lidar_row[x]) && std::isfinite(dap_row[x]))
+                    scale_ratios.push_back(lidar_row[x] / dap_row[x]);
+            }
+        }
+        if (scale_ratios.empty())
+            throw std::runtime_error("No valid LiDAR/DAP overlap for depth scale alignment");
+        const auto middle = scale_ratios.begin() + scale_ratios.size() / 2;
+        std::nth_element(scale_ratios.begin(), middle, scale_ratios.end());
+        const float dap_scale = *middle;
+        depth_map = dap_depth * dap_scale;
+        lidar_depth.copyTo(depth_map, lidar_depth > 0.0f);
+        if ((all_frame_num_ + 1) % select_every_k_frame_ == 0)
+            std::cout << std::fixed << std::setprecision(4)
+                      << "[DepthFusion] DAP scale " << dap_scale
+                      << ", LiDAR anchors " << scale_ratios.size() << std::endl;
+    }
 
     /// pose
     Eigen::Quaterniond q_wc;
@@ -200,6 +268,41 @@ void Dataset::addFrame(Frame& cur_frame)
             else
             {
                 // std::cout << "[bef vs aft diff]: " << mean_depth_difference << " m" << std::endl;
+            }
+        }
+        else if (!external_depth_dir_.empty() && equirectangular_)
+        {
+            // Use the fused depth only in LiDAR blind patches. This preserves
+            // the original sparse LiDAR initialization while adding a small,
+            // controlled number of DAP-supported ERP Gaussians.
+            cv::Mat depth_gradient_x, depth_gradient_y;
+            cv::Sobel(depth_map, depth_gradient_x, CV_32F, 1, 0, 3);
+            cv::Sobel(depth_map, depth_gradient_y, CV_32F, 0, 1, 3);
+            cv::Mat depth_edges;
+            cv::magnitude(depth_gradient_x, depth_gradient_y, depth_edges);
+            cv::Mat mask_not_edges = depth_edges < 0.1;
+            cv::Mat wanted_depth;
+            depth_map.copyTo(wanted_depth, (depth_map > 0) & mask_not_edges & (depth_map < max_depth_));
+
+            std::vector<PixelPosition> new_positions = selectFromDepthCompletion(lidar_depth, wanted_depth, patch_size_);
+            for (const auto& pt : new_positions)
+            {
+                const int u = pt.u, v = pt.v;
+                const float depth = wanted_depth.at<float>(v, u);
+                if (depth <= 0.0f || depth > max_depth_) continue;
+
+                const double longitude = (static_cast<double>(u) / width - 0.5) * 2.0 * M_PI;
+                const double latitude = (0.5 - static_cast<double>(v) / height) * M_PI;
+                const double cos_latitude = std::cos(latitude);
+                Eigen::Vector3d cam_point(
+                    depth * cos_latitude * std::sin(longitude),
+                    -depth * std::sin(latitude),
+                    depth * cos_latitude * std::cos(longitude));
+                Eigen::Vector3d world_point = q_wc * cam_point + t_wc;
+                cv::Vec3f color = image_rgb.at<cv::Vec3f>(v, u);
+                pointcloud_.emplace_back(world_point);
+                pointcolor_.emplace_back(Eigen::Vector3d(color[0], color[1], color[2]));
+                pointdepth_.emplace_back(depth);
             }
         }
 
@@ -632,6 +735,44 @@ void GaussianModel::densificationPostfix(
     GAUSSIAN_MODEL_TENSORS_TO_VEC
 }
 
+static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
+                               const torch::Tensor& rendered_depth,
+                               const std::string& diagnosis_dir)
+{
+    auto fused_cpu = camera->original_depth_.detach().to(torch::kCPU).contiguous();
+    auto rendered_cpu = rendered_depth.detach().to(torch::kCPU).contiguous();
+    const int height = static_cast<int>(fused_cpu.size(0));
+    const int width = static_cast<int>(fused_cpu.size(1));
+    cv::Mat fused(height, width, CV_32FC1, fused_cpu.data_ptr<float>());
+    cv::Mat rendered(height, width, CV_32FC1, rendered_cpu.data_ptr<float>());
+    cv::Mat valid = (fused > 0.0f) & (rendered > 0.0f);
+
+    auto colorize = [](const cv::Mat& depth, const cv::Mat& mask, double max_depth) {
+        cv::Mat clipped;
+        depth.copyTo(clipped);
+        clipped.setTo(0, ~mask);
+        clipped = cv::min(clipped, max_depth);
+        clipped.convertTo(clipped, CV_8UC1, 255.0 / max_depth);
+        cv::Mat colored;
+        cv::applyColorMap(clipped, colored, cv::COLORMAP_TURBO);
+        colored.setTo(cv::Scalar(0, 0, 0), ~mask);
+        return colored;
+    };
+
+    cv::Mat fused_valid, rendered_valid;
+    fused.copyTo(fused_valid, fused > 0.0f);
+    rendered.copyTo(rendered_valid, rendered > 0.0f);
+    double fused_max = 0.0, rendered_max = 0.0;
+    cv::minMaxLoc(fused_valid, nullptr, &fused_max);
+    cv::minMaxLoc(rendered_valid, nullptr, &rendered_max);
+    const double visualization_max = std::max(1.0, std::min(80.0, std::max(fused_max, rendered_max)));
+    cv::Mat difference = cv::abs(fused - rendered);
+    difference.setTo(0, ~valid);
+    cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused > 0.0f, visualization_max));
+    cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered > 0.0f, visualization_max));
+    cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
+}
+
 void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
 {
     torch::NoGradGuard no_grad;
@@ -918,6 +1059,8 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     fs::create_directories(render_depth_dir_path);
     std::string gt_dir_path = result_path + "/gt";
     fs::create_directories(gt_dir_path);
+    std::string diagnosis_dir_path = result_path + "/depth_diagnose";
+    fs::create_directories(diagnosis_dir_path);
 
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
@@ -946,6 +1089,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto render_pkg = render(train_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
+            saveDepthDiagnosis(train_camera, rendered_depth, diagnosis_dir_path);
             auto gt_image = train_camera->original_image_.cuda().clamp(0, 1);
             const bool use_metric_mask = metric_mask.defined() && train_camera->is_equirectangular_;
             auto metric_rendered = rendered_image;

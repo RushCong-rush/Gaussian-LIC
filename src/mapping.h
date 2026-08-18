@@ -72,6 +72,7 @@ public:
         depth_completion = node["depth_completion"].as<bool>();
         patch_size = node["patch_size"].as<int>();
         max_depth = node["max_depth"].as<double>();
+        external_depth_dir = node["external_depth_dir"] ? node["external_depth_dir"].as<std::string>() : "";
         std::string pkg_path = ros::package::getPath("gaussian_lic");
         if (height == 512 && width == 640) engine_path = pkg_path + "/ckpt/spnet_512_640.engine";
         if (height == 480 && width == 640) engine_path = pkg_path + "/ckpt/spnet_480_640.engine";
@@ -116,6 +117,7 @@ public:
     bool depth_completion;
     int patch_size;
     double max_depth;
+    std::string external_depth_dir;
     std::string engine_path;
 
     /// gaussian
