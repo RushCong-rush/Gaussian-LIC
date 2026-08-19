@@ -57,6 +57,9 @@ public:
         equirectangular_(prm.equirectangular),
         select_every_k_frame_(prm.select_every_k_frame),
         depth_completion_(prm.depth_completion),
+        dap_dense_depth_supervision_(prm.dap_dense_depth_supervision),
+        dap_initialize_gaussians_(prm.dap_initialize_gaussians),
+        dap_seed_lidar_dilation_pixels_(prm.dap_seed_lidar_dilation_pixels),
         patch_size_(prm.patch_size), max_depth_(prm.max_depth),
         all_frame_num_(0), is_keyframe_current_(false)
     {
@@ -87,9 +90,15 @@ public:
 
     int select_every_k_frame_;
     bool depth_completion_;
+    bool dap_dense_depth_supervision_;
+    bool dap_initialize_gaussians_;
+    int dap_seed_lidar_dilation_pixels_;
     int patch_size_;
     double max_depth_;
     std::string diagnosis_dir_;
+    bool has_previous_keyframe_pose_ = false;
+    Eigen::Matrix3d previous_keyframe_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d previous_keyframe_translation_ = Eigen::Vector3d::Zero();
     torch::Tensor metric_mask_;
 
 

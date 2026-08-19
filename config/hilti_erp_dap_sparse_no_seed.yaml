@@ -11,9 +11,8 @@ select_every_k_frame: 5
 depth_completion: false
 online_dap: true
 dap_topic: /depth_dap_for_gs
-# Match the original SPNet path: completed depth seeds Gaussians, while
-# measured LiDAR alone supervises geometry during optimization.
 dap_dense_depth_supervision: false
+dap_initialize_gaussians: false
 patch_size: 10
 max_depth: 80
 
@@ -26,7 +25,7 @@ lambda_erank: 0
 scaling_scale: 2
 
 position_lr: 0.00016
-feature_lr: 0.005
+feature_lr: 0.0050
 opacity_lr: 0.05
 scaling_lr: 0.015
 rotation_lr: 0.001

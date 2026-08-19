@@ -46,7 +46,7 @@ void pointCallback(const sensor_msgs::PointCloud2ConstPtr& point_msg)
 {
     m_buf.lock();
     point_buf.push(point_msg);
-    last_point_time = ros::Time::now().toSec();
+    last_point_time = ros::WallTime::now().toSec();
     m_buf.unlock();
 }
 
@@ -303,11 +303,12 @@ int main(int argc, char** argv)
     std::thread monitor_thread([](){
         while (!exit_flag) 
         {
-            double now = ros::Time::now().toSec();
+            double now = ros::WallTime::now().toSec();
             if (gaussians_initialized && (now - last_point_time > 5.0)) 
             {
                 m_buf.lock();
-                if (point_buf.empty()) exit_flag = true;
+                if (point_buf.empty() || (online_dap_enabled && dap_depth_buf.empty()))
+                    exit_flag = true;
                 m_buf.unlock();
             } 
             std::this_thread::sleep_for(std::chrono::milliseconds(500));

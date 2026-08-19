@@ -29,6 +29,7 @@
 #include <random>
 #include <algorithm>
 #include <iterator>
+#include <numeric>
 #include <filesystem>
 #include <algorithm>
 #include <chrono>
@@ -106,6 +107,21 @@ std::vector<PixelPosition> selectFromDepthCompletion(const cv::Mat& depth_A, con
 
 void Dataset::addFrame(Frame& cur_frame)
 {
+    const int frame_index = all_frame_num_;
+    const bool is_keyframe = ((frame_index + 1) % select_every_k_frame_ == 0);
+    bool has_dap_fusion = false;
+    float dap_scale_for_diagnosis = std::numeric_limits<float>::quiet_NaN();
+    double ratio_p10_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_p90_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_mad_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_min_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_max_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_mean_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    double ratio_std_for_diagnosis = std::numeric_limits<double>::quiet_NaN();
+    std::vector<float> fusion_abs_errors;
+    std::vector<float> fusion_relative_errors;
+    size_t fusion_overlap_count = 0;
+
     /// image
     cv_bridge::CvImagePtr cv_ptr;
     cv_ptr = cv_bridge::toCvCopy(cur_frame.image_msg, sensor_msgs::image_encodings::BGR8);
@@ -146,6 +162,56 @@ void Dataset::addFrame(Frame& cur_frame)
         const auto middle = scale_ratios.begin() + scale_ratios.size() / 2;
         std::nth_element(scale_ratios.begin(), middle, scale_ratios.end());
         const float dap_scale = *middle;
+        const auto ratio_minmax = std::minmax_element(scale_ratios.begin(), scale_ratios.end());
+        double ratio_sum = 0.0;
+        double ratio_sq_sum = 0.0;
+        for (float ratio : scale_ratios)
+        {
+            ratio_sum += ratio;
+            ratio_sq_sum += static_cast<double>(ratio) * ratio;
+        }
+        const double ratio_mean = ratio_sum / scale_ratios.size();
+        const double ratio_variance = std::max(0.0, ratio_sq_sum / scale_ratios.size() - ratio_mean * ratio_mean);
+        auto percentileValue = [](std::vector<float> values, double p) {
+            if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+            const size_t index = static_cast<size_t>(p * static_cast<double>(values.size() - 1));
+            std::nth_element(values.begin(), values.begin() + index, values.end());
+            return static_cast<double>(values[index]);
+        };
+        std::vector<float> ratio_deviations;
+        ratio_deviations.reserve(scale_ratios.size());
+        for (float ratio : scale_ratios)
+            ratio_deviations.push_back(std::abs(ratio - dap_scale));
+        const double ratio_p10 = percentileValue(scale_ratios, 0.10);
+        const double ratio_p90 = percentileValue(scale_ratios, 0.90);
+        const double ratio_mad = percentileValue(ratio_deviations, 0.50);
+        ratio_p10_for_diagnosis = ratio_p10;
+        ratio_p90_for_diagnosis = ratio_p90;
+        ratio_mad_for_diagnosis = ratio_mad;
+        ratio_min_for_diagnosis = *ratio_minmax.first;
+        ratio_max_for_diagnosis = *ratio_minmax.second;
+        ratio_mean_for_diagnosis = ratio_mean;
+        ratio_std_for_diagnosis = std::sqrt(ratio_variance);
+        has_dap_fusion = true;
+        dap_scale_for_diagnosis = dap_scale;
+        fusion_overlap_count = scale_ratios.size();
+        fusion_abs_errors.reserve(scale_ratios.size());
+        fusion_relative_errors.reserve(scale_ratios.size());
+        for (int y = 0; y < depth_map.rows; ++y)
+        {
+            const float* lidar_row = lidar_depth.ptr<float>(y);
+            const float* dap_row = dap_depth.ptr<float>(y);
+            for (int x = 0; x < depth_map.cols; ++x)
+            {
+                if (lidar_row[x] > 0.0f && dap_row[x] > 0.0f &&
+                    std::isfinite(lidar_row[x]) && std::isfinite(dap_row[x]))
+                {
+                    const float aligned = dap_row[x] * dap_scale;
+                    fusion_abs_errors.push_back(std::abs(aligned - lidar_row[x]));
+                    fusion_relative_errors.push_back(std::abs(aligned - lidar_row[x]) / lidar_row[x]);
+                }
+            }
+        }
         depth_map = dap_depth * dap_scale;
         lidar_depth.copyTo(depth_map, lidar_depth > 0.0f);
         if ((all_frame_num_ + 1) % select_every_k_frame_ == 0)
@@ -180,16 +246,66 @@ void Dataset::addFrame(Frame& cur_frame)
     R_wc_.push_back(q_wc.toRotationMatrix());
     t_wc_.push_back(t_wc);
 
+    if (has_dap_fusion && !diagnosis_dir_.empty())
+    {
+        auto percentile = [](std::vector<float> values, double p) {
+            if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+            const size_t index = static_cast<size_t>(p * static_cast<double>(values.size() - 1));
+            std::nth_element(values.begin(), values.begin() + index, values.end());
+            return static_cast<double>(values[index]);
+        };
+        auto mean = [](const std::vector<float>& values) {
+            if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+            double sum = 0.0;
+            for (float value : values) sum += value;
+            return sum / static_cast<double>(values.size());
+        };
+        double translation_delta = std::numeric_limits<double>::quiet_NaN();
+        double rotation_delta_deg = std::numeric_limits<double>::quiet_NaN();
+        if (is_keyframe && has_previous_keyframe_pose_)
+        {
+            translation_delta = (t_wc - previous_keyframe_translation_).norm();
+            const Eigen::Matrix3d relative_rotation = previous_keyframe_rotation_.transpose() * q_wc.toRotationMatrix();
+            rotation_delta_deg = Eigen::AngleAxisd(relative_rotation).angle() * 180.0 / M_PI;
+        }
+        if (is_keyframe)
+        {
+            previous_keyframe_rotation_ = q_wc.toRotationMatrix();
+            previous_keyframe_translation_ = t_wc;
+            has_previous_keyframe_pose_ = true;
+        }
+
+        fs::create_directories(diagnosis_dir_);
+        const std::string path = diagnosis_dir_ + "/fusion_depth_metrics.csv";
+        const bool write_header = !fs::exists(path) || fs::file_size(path) == 0;
+        std::ofstream stream(path, std::ios::app);
+        if (write_header)
+            stream << "frame_index,timestamp_ns,is_keyframe,dap_scale,dap_scale_min_pixel,dap_scale_max_pixel,"
+                      "dap_scale_mean_pixel,dap_scale_std_pixel,dap_scale_p10,dap_scale_p90,dap_scale_mad,"
+                      "lidar_dap_overlap_pixels,"
+                      "aligned_mae_m,aligned_median_abs_m,aligned_p90_abs_m,aligned_absrel_mean,"
+                      "translation_delta_m,rotation_delta_deg\n";
+        stream << frame_index << ',' << cur_frame.image_msg->header.stamp.toNSec() << ','
+               << (is_keyframe ? 1 : 0) << ',' << dap_scale_for_diagnosis << ',' << ratio_min_for_diagnosis << ','
+               << ratio_max_for_diagnosis << ',' << ratio_mean_for_diagnosis << ',' << ratio_std_for_diagnosis << ','
+               << ratio_p10_for_diagnosis << ',' << ratio_p90_for_diagnosis << ',' << ratio_mad_for_diagnosis << ','
+               << fusion_overlap_count << ','
+               << mean(fusion_abs_errors) << ',' << percentile(fusion_abs_errors, 0.50) << ','
+               << percentile(fusion_abs_errors, 0.90) << ',' << mean(fusion_relative_errors) << ','
+               << translation_delta << ',' << rotation_delta_deg << '\n';
+    }
+
     /// point
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::fromROSMsg(*cur_frame.point_msg, *cloud);
     for (const auto& pt : cloud->points)
     {
-        pointcloud_.emplace_back(Eigen::Vector3d(pt.x, pt.y, pt.z));
-        pointcolor_.emplace_back(Eigen::Vector3d(pt.r, pt.g, pt.b) / 255.0);
         Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
         Eigen::Vector3d t_cw = - R_cw * t_wc;
-        Eigen::Vector3d pt_c = R_cw * pointcloud_.back() + t_cw;
+        Eigen::Vector3d pt_w(pt.x, pt.y, pt.z);
+        Eigen::Vector3d pt_c = R_cw * pt_w + t_cw;
+        pointcloud_.emplace_back(pt_w);
+        pointcolor_.emplace_back(Eigen::Vector3d(pt.r, pt.g, pt.b) / 255.0);
         if (!equirectangular_)
             assert(pt_c(2) > 0);
         pointdepth_.push_back(static_cast<float>(
@@ -198,6 +314,9 @@ void Dataset::addFrame(Frame& cur_frame)
 
     /// train & test
     int width = image_rgb.cols, height = image_rgb.rows;
+    cv::Mat lidar_valid_mask = lidar_depth > 0.0f;
+    auto lidar_valid_tensor = torch::from_blob(
+        lidar_valid_mask.data, {height, width}, torch::TensorOptions().dtype(torch::kUInt8)).clone();
     if ((all_frame_num_ + 1) % select_every_k_frame_ == 0)
     {
         is_keyframe_current_ = true;
@@ -256,7 +375,7 @@ void Dataset::addFrame(Frame& cur_frame)
                 // std::cout << "[bef vs aft diff]: " << mean_depth_difference << " m" << std::endl;
             }
         }
-        else if (cur_frame.dap_depth_msg && equirectangular_)
+        else if (cur_frame.dap_depth_msg && equirectangular_ && dap_initialize_gaussians_)
         {
             // Use the fused depth only in LiDAR blind patches. This preserves
             // the original sparse LiDAR initialization while adding a small,
@@ -270,7 +389,20 @@ void Dataset::addFrame(Frame& cur_frame)
             cv::Mat wanted_depth;
             depth_map.copyTo(wanted_depth, (depth_map > 0) & mask_not_edges & (depth_map < max_depth_));
 
-            std::vector<PixelPosition> new_positions = selectFromDepthCompletion(lidar_depth, wanted_depth, patch_size_);
+            cv::Mat seed_lidar_depth = lidar_depth;
+            if (dap_seed_lidar_dilation_pixels_ > 0)
+            {
+                cv::Mat lidar_mask = lidar_depth > 0.0f;
+                cv::Mat dilated_mask;
+                const int kernel_size = 2 * dap_seed_lidar_dilation_pixels_ + 1;
+                cv::dilate(lidar_mask, dilated_mask,
+                           cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                                                     cv::Size(kernel_size, kernel_size)));
+                seed_lidar_depth = lidar_depth.clone();
+                seed_lidar_depth.setTo(1.0f, dilated_mask);
+            }
+            std::vector<PixelPosition> new_positions =
+                selectFromDepthCompletion(seed_lidar_depth, wanted_depth, patch_size_);
             for (const auto& pt : new_positions)
             {
                 const int u = pt.u, v = pt.v;
@@ -293,7 +425,11 @@ void Dataset::addFrame(Frame& cur_frame)
         }
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU, true);
-        cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU, true);
+        cv::Mat& supervision_depth =
+            (cur_frame.dap_depth_msg && !dap_dense_depth_supervision_) ? lidar_depth : depth_map;
+        cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(supervision_depth, torch::kCPU, true);
+        cam->diagnostic_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU, true);
+        cam->lidar_valid_mask_ = lidar_valid_tensor;
         
         std::stringstream ss;
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
@@ -312,7 +448,11 @@ void Dataset::addFrame(Frame& cur_frame)
         std::shared_ptr<Camera> cam = std::make_shared<Camera>();
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU);
-        cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);
+        cv::Mat& supervision_depth =
+            (cur_frame.dap_depth_msg && !dap_dense_depth_supervision_) ? lidar_depth : depth_map;
+        cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(supervision_depth, torch::kCPU);
+        cam->diagnostic_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);
+        cam->lidar_valid_mask_ = lidar_valid_tensor;
 
         std::stringstream ss;
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
@@ -725,12 +865,14 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                                const torch::Tensor& rendered_depth,
                                const std::string& diagnosis_dir)
 {
-    auto fused_cpu = camera->original_depth_.detach().to(torch::kCPU).contiguous();
+    auto fused_cpu = camera->diagnostic_depth_.detach().to(torch::kCPU).contiguous();
     auto rendered_cpu = rendered_depth.detach().to(torch::kCPU).contiguous();
     const int height = static_cast<int>(fused_cpu.size(0));
     const int width = static_cast<int>(fused_cpu.size(1));
     cv::Mat fused(height, width, CV_32FC1, fused_cpu.data_ptr<float>());
     cv::Mat rendered(height, width, CV_32FC1, rendered_cpu.data_ptr<float>());
+    auto lidar_mask_cpu = camera->lidar_valid_mask_.detach().to(torch::kCPU).contiguous();
+    cv::Mat lidar_mask(height, width, CV_8UC1, lidar_mask_cpu.data_ptr<uint8_t>());
     cv::Mat valid = (fused > 0.0f) & (rendered > 0.0f);
 
     auto colorize = [](const cv::Mat& depth, const cv::Mat& mask, double max_depth) {
@@ -757,6 +899,106 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused > 0.0f, visualization_max));
     cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered > 0.0f, visualization_max));
     cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
+
+    std::vector<float> abs_errors;
+    std::vector<float> lidar_abs_errors;
+    std::vector<float> lidar_relative_errors;
+    std::vector<float> dap_fill_abs_errors;
+    std::vector<float> dap_fill_relative_errors;
+    abs_errors.reserve(static_cast<size_t>(height * width / 4));
+    lidar_abs_errors.reserve(static_cast<size_t>(height * width / 20));
+    lidar_relative_errors.reserve(static_cast<size_t>(height * width / 20));
+    dap_fill_abs_errors.reserve(static_cast<size_t>(height * width / 4));
+    dap_fill_relative_errors.reserve(static_cast<size_t>(height * width / 4));
+    double squared_error_sum = 0.0;
+    double lidar_squared_error_sum = 0.0;
+    double dap_fill_squared_error_sum = 0.0;
+    double relative_error_sum = 0.0;
+    size_t fused_valid_count = 0;
+    size_t rendered_valid_count = 0;
+    size_t overlap_count = 0;
+    for (int y = 0; y < height; ++y)
+    {
+        const float* fused_row = fused.ptr<float>(y);
+        const float* rendered_row = rendered.ptr<float>(y);
+        const uint8_t* lidar_mask_row = lidar_mask.ptr<uint8_t>(y);
+        for (int x = 0; x < width; ++x)
+        {
+            const float fused_value = fused_row[x];
+            const float rendered_value = rendered_row[x];
+            const bool fused_valid_pixel = fused_value > 0.0f && std::isfinite(fused_value);
+            const bool rendered_valid_pixel = rendered_value > 0.0f && std::isfinite(rendered_value);
+            if (fused_valid_pixel) ++fused_valid_count;
+            if (rendered_valid_pixel) ++rendered_valid_count;
+            if (fused_valid_pixel && rendered_valid_pixel)
+            {
+                const double absolute_error = std::abs(static_cast<double>(fused_value) - rendered_value);
+                abs_errors.push_back(static_cast<float>(absolute_error));
+                squared_error_sum += absolute_error * absolute_error;
+                relative_error_sum += absolute_error / std::max(1e-6, static_cast<double>(fused_value));
+                const float relative_error = static_cast<float>(
+                    absolute_error / std::max(1e-6, static_cast<double>(fused_value)));
+                if (lidar_mask_row[x] > 0)
+                {
+                    lidar_abs_errors.push_back(static_cast<float>(absolute_error));
+                    lidar_relative_errors.push_back(relative_error);
+                    lidar_squared_error_sum += absolute_error * absolute_error;
+                }
+                else
+                {
+                    dap_fill_abs_errors.push_back(static_cast<float>(absolute_error));
+                    dap_fill_relative_errors.push_back(relative_error);
+                    dap_fill_squared_error_sum += absolute_error * absolute_error;
+                }
+                ++overlap_count;
+            }
+        }
+    }
+    auto percentile = [](std::vector<float> values, double p) {
+        if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+        const size_t index = static_cast<size_t>(p * static_cast<double>(values.size() - 1));
+        std::nth_element(values.begin(), values.begin() + index, values.end());
+        return static_cast<double>(values[index]);
+    };
+    double mae = std::numeric_limits<double>::quiet_NaN();
+    double rmse = std::numeric_limits<double>::quiet_NaN();
+    double absrel = std::numeric_limits<double>::quiet_NaN();
+    if (overlap_count > 0)
+    {
+        mae = std::accumulate(abs_errors.begin(), abs_errors.end(), 0.0) / overlap_count;
+        rmse = std::sqrt(squared_error_sum / overlap_count);
+        absrel = relative_error_sum / overlap_count;
+    }
+    auto mean = [](const std::vector<float>& values) {
+        if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+        return std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+    };
+    auto regionRmse = [](double squared_sum, size_t count) {
+        return count > 0 ? std::sqrt(squared_sum / count) : std::numeric_limits<double>::quiet_NaN();
+    };
+    const std::string metrics_path = diagnosis_dir + "/render_depth_metrics.csv";
+    const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
+    std::ofstream metrics(metrics_path, std::ios::app);
+    if (write_header)
+        metrics << "image_name,total_pixels,fused_valid_pixels,rendered_valid_pixels,overlap_pixels,"
+                   "fused_valid_fraction,rendered_valid_fraction,overlap_fraction,mae_m,rmse_m,"
+                   "median_abs_m,p90_abs_m,absrel_mean,"
+                   "lidar_overlap_pixels,lidar_mae_m,lidar_rmse_m,lidar_median_abs_m,lidar_p90_abs_m,lidar_absrel_mean,"
+                   "dap_fill_overlap_pixels,dap_fill_mae_m,dap_fill_rmse_m,dap_fill_median_abs_m,"
+                   "dap_fill_p90_abs_m,dap_fill_absrel_mean\n";
+    const double total_pixels = static_cast<double>(height) * width;
+    metrics << camera->image_name_ << ',' << static_cast<size_t>(total_pixels) << ','
+            << fused_valid_count << ',' << rendered_valid_count << ',' << overlap_count << ','
+            << fused_valid_count / total_pixels << ',' << rendered_valid_count / total_pixels << ','
+            << overlap_count / total_pixels << ',' << mae << ',' << rmse << ','
+            << percentile(abs_errors, 0.50) << ',' << percentile(abs_errors, 0.90) << ',' << absrel << ','
+            << lidar_abs_errors.size() << ',' << mean(lidar_abs_errors) << ','
+            << regionRmse(lidar_squared_error_sum, lidar_abs_errors.size()) << ','
+            << percentile(lidar_abs_errors, 0.50) << ',' << percentile(lidar_abs_errors, 0.90) << ','
+            << mean(lidar_relative_errors) << ',' << dap_fill_abs_errors.size() << ','
+            << mean(dap_fill_abs_errors) << ',' << regionRmse(dap_fill_squared_error_sum, dap_fill_abs_errors.size()) << ','
+            << percentile(dap_fill_abs_errors, 0.50) << ',' << percentile(dap_fill_abs_errors, 0.90) << ','
+            << mean(dap_fill_relative_errors) << '\n';
 }
 
 void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
@@ -1036,17 +1278,27 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     std::cout << "\n     🎉 Evaluate Visual Quality 🎉\n";
     std::cout << "\n        [Number of Final Gaussians] " << pc->getXYZ().size(0) << std::endl;
 
-    if (fs::exists(result_path)) fs::remove_all(result_path);
     fs::create_directories(result_path);
 
     std::string render_dir_path = result_path + "/render";
+    if (fs::exists(render_dir_path)) fs::remove_all(render_dir_path);
     fs::create_directories(render_dir_path);
     std::string render_depth_dir_path = result_path + "/render_depth";
+    if (fs::exists(render_depth_dir_path)) fs::remove_all(render_depth_dir_path);
     fs::create_directories(render_depth_dir_path);
     std::string gt_dir_path = result_path + "/gt";
+    if (fs::exists(gt_dir_path)) fs::remove_all(gt_dir_path);
     fs::create_directories(gt_dir_path);
     std::string diagnosis_dir_path = result_path + "/depth_diagnose";
     fs::create_directories(diagnosis_dir_path);
+    for (const auto& entry : fs::directory_iterator(diagnosis_dir_path))
+    {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("composite_", 0) == 0 || name.rfind("rendered_", 0) == 0 ||
+            name.rfind("absdiff_", 0) == 0 || name == "render_depth_metrics.csv" ||
+            name == "render_rgb_metrics.csv")
+            fs::remove(entry.path());
+    }
 
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
@@ -1096,6 +1348,13 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             inputs.push_back(metric_rendered.unsqueeze(0));
             inputs.push_back(metric_gt.unsqueeze(0));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
+            {
+                const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
+                const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
+                std::ofstream metrics(metrics_path, std::ios::app);
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips\n";
+                metrics << train_camera->image_name_ << ",train," << psnr << ',' << ssim << ',' << lpips << '\n';
+            }
             psnrs += psnr;
             ssims += ssim;
             lpipss += lpips;
@@ -1158,6 +1417,13 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             inputs.push_back(metric_rendered.unsqueeze(0));
             inputs.push_back(metric_gt.unsqueeze(0));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
+            {
+                const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
+                const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
+                std::ofstream metrics(metrics_path, std::ios::app);
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips\n";
+                metrics << test_camera->image_name_ << ",test," << psnr << ',' << ssim << ',' << lpips << '\n';
+            }
             psnrs += psnr;
             ssims += ssim;
             lpipss += lpips;

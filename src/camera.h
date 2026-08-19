@@ -121,6 +121,8 @@ public:
     int image_height_;
     torch::Tensor original_image_;
     torch::Tensor original_depth_;
+    torch::Tensor diagnostic_depth_;
+    torch::Tensor lidar_valid_mask_;
           
     float fx_;
     float fy_;
