@@ -71,6 +71,7 @@ public:
         select_every_k_frame = node["select_every_k_frame"].as<int>();
         depth_completion = node["depth_completion"].as<bool>();
         patch_size = node["patch_size"].as<int>();
+        min_point_depth = node["min_point_depth"] ? node["min_point_depth"].as<double>() : 0.0;
         max_depth = node["max_depth"].as<double>();
         online_dap = node["online_dap"] ? node["online_dap"].as<bool>() : false;
         dap_topic = node["dap_topic"] ? node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
@@ -123,6 +124,7 @@ public:
     int select_every_k_frame;
     bool depth_completion;
     int patch_size;
+    double min_point_depth;
     double max_depth;
     bool online_dap;
     std::string dap_topic;

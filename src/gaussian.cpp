@@ -298,18 +298,26 @@ void Dataset::addFrame(Frame& cur_frame)
     /// point
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::fromROSMsg(*cur_frame.point_msg, *cloud);
+    size_t lidar_points_filtered_near = 0;
+    size_t lidar_points_kept = 0;
     for (const auto& pt : cloud->points)
     {
         Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
         Eigen::Vector3d t_cw = - R_cw * t_wc;
         Eigen::Vector3d pt_w(pt.x, pt.y, pt.z);
         Eigen::Vector3d pt_c = R_cw * pt_w + t_cw;
+        const double point_depth = equirectangular_ ? pt_c.norm() : pt_c(2);
+        if (point_depth < min_point_depth_)
+        {
+            ++lidar_points_filtered_near;
+            continue;
+        }
         pointcloud_.emplace_back(pt_w);
         pointcolor_.emplace_back(Eigen::Vector3d(pt.r, pt.g, pt.b) / 255.0);
+        ++lidar_points_kept;
         if (!equirectangular_)
             assert(pt_c(2) > 0);
-        pointdepth_.push_back(static_cast<float>(
-            equirectangular_ ? pt_c.norm() : pt_c(2)));
+        pointdepth_.push_back(static_cast<float>(point_depth));
     }
 
     /// train & test
@@ -387,7 +395,8 @@ void Dataset::addFrame(Frame& cur_frame)
             cv::magnitude(depth_gradient_x, depth_gradient_y, depth_edges);
             cv::Mat mask_not_edges = depth_edges < 0.1;
             cv::Mat wanted_depth;
-            depth_map.copyTo(wanted_depth, (depth_map > 0) & mask_not_edges & (depth_map < max_depth_));
+            depth_map.copyTo(wanted_depth, (depth_map >= min_point_depth_) &
+                                         mask_not_edges & (depth_map < max_depth_));
 
             cv::Mat seed_lidar_depth = lidar_depth;
             if (dap_seed_lidar_dilation_pixels_ > 0)
@@ -422,6 +431,20 @@ void Dataset::addFrame(Frame& cur_frame)
                 pointcolor_.emplace_back(Eigen::Vector3d(color[0], color[1], color[2]));
                 pointdepth_.emplace_back(depth);
             }
+        }
+
+        if (!diagnosis_dir_.empty() && (lidar_points_filtered_near > 0 ||
+                                        (cur_frame.dap_depth_msg && equirectangular_ && dap_initialize_gaussians_)))
+        {
+            fs::create_directories(diagnosis_dir_);
+            const std::string path = diagnosis_dir_ + "/near_point_filter_metrics.csv";
+            const bool write_header = !fs::exists(path) || fs::file_size(path) == 0;
+            std::ofstream stream(path, std::ios::app);
+            if (write_header)
+                stream << "frame_index,timestamp_ns,min_point_depth_m,lidar_input_points,lidar_kept_points,lidar_filtered_near_points\n";
+            stream << frame_index << ',' << cur_frame.image_msg->header.stamp.toNSec() << ','
+                   << min_point_depth_ << ',' << cloud->size() << ',' << lidar_points_kept << ','
+                   << lidar_points_filtered_near << '\n';
         }
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU, true);
