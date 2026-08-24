@@ -930,6 +930,48 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     cv::Mat lidar_mask(height, width, CV_8UC1, lidar_mask_cpu.data_ptr<uint8_t>());
     cv::Mat valid = (fused > 0.0f) & (rendered > 0.0f);
 
+    constexpr int lidar_dilation_radius = 1;
+    cv::Mat lidar_dilated_depth = cv::Mat::zeros(height, width, CV_32FC1);
+    cv::Mat lidar_source_distance(height, width, CV_32SC1,
+                                  cv::Scalar(std::numeric_limits<int>::max()));
+    for (int y = 0; y < height; ++y)
+    {
+        const uint8_t* lidar_mask_row = lidar_mask.ptr<uint8_t>(y);
+        const float* fused_row = fused.ptr<float>(y);
+        for (int x = 0; x < width; ++x)
+        {
+            // Fused depth keeps the original LiDAR value at every LiDAR-mask pixel.
+            const float lidar_depth = fused_row[x];
+            if (lidar_mask_row[x] == 0 || lidar_depth <= 0.0f || !std::isfinite(lidar_depth))
+                continue;
+            for (int dy = -lidar_dilation_radius; dy <= lidar_dilation_radius; ++dy)
+            {
+                const int target_y = y + dy;
+                if (target_y < 0 || target_y >= height)
+                    continue;
+                for (int dx = -lidar_dilation_radius; dx <= lidar_dilation_radius; ++dx)
+                {
+                    int target_x = x + dx;
+                    if (camera->is_equirectangular_)
+                        target_x = (target_x % width + width) % width;
+                    else if (target_x < 0 || target_x >= width)
+                        continue;
+
+                    const int distance = dx * dx + dy * dy;
+                    int& current_distance = lidar_source_distance.at<int>(target_y, target_x);
+                    float& current_depth = lidar_dilated_depth.at<float>(target_y, target_x);
+                    if (distance < current_distance ||
+                        (distance == current_distance &&
+                         (current_depth <= 0.0f || lidar_depth < current_depth)))
+                    {
+                        current_distance = distance;
+                        current_depth = lidar_depth;
+                    }
+                }
+            }
+        }
+    }
+
     auto colorize = [](const cv::Mat& depth, const cv::Mat& mask, double max_depth) {
         cv::Mat clipped;
         depth.copyTo(clipped);
@@ -958,15 +1000,20 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     std::vector<float> abs_errors;
     std::vector<float> lidar_abs_errors;
     std::vector<float> lidar_relative_errors;
+    std::vector<float> lidar_dilated_abs_errors;
+    std::vector<float> lidar_dilated_relative_errors;
     std::vector<float> dap_fill_abs_errors;
     std::vector<float> dap_fill_relative_errors;
     abs_errors.reserve(static_cast<size_t>(height * width / 4));
     lidar_abs_errors.reserve(static_cast<size_t>(height * width / 20));
     lidar_relative_errors.reserve(static_cast<size_t>(height * width / 20));
+    lidar_dilated_abs_errors.reserve(static_cast<size_t>(height * width / 8));
+    lidar_dilated_relative_errors.reserve(static_cast<size_t>(height * width / 8));
     dap_fill_abs_errors.reserve(static_cast<size_t>(height * width / 4));
     dap_fill_relative_errors.reserve(static_cast<size_t>(height * width / 4));
     double squared_error_sum = 0.0;
     double lidar_squared_error_sum = 0.0;
+    double lidar_dilated_squared_error_sum = 0.0;
     double dap_fill_squared_error_sum = 0.0;
     double relative_error_sum = 0.0;
     size_t fused_valid_count = 0;
@@ -976,11 +1023,13 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     {
         const float* fused_row = fused.ptr<float>(y);
         const float* rendered_row = rendered.ptr<float>(y);
+        const float* lidar_dilated_row = lidar_dilated_depth.ptr<float>(y);
         const uint8_t* lidar_mask_row = lidar_mask.ptr<uint8_t>(y);
         for (int x = 0; x < width; ++x)
         {
             const float fused_value = fused_row[x];
             const float rendered_value = rendered_row[x];
+            const float lidar_dilated_value = lidar_dilated_row[x];
             const bool fused_valid_pixel = fused_value > 0.0f && std::isfinite(fused_value);
             const bool rendered_valid_pixel = rendered_value > 0.0f && std::isfinite(rendered_value);
             if (fused_valid_pixel) ++fused_valid_count;
@@ -1006,6 +1055,16 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                     dap_fill_squared_error_sum += absolute_error * absolute_error;
                 }
                 ++overlap_count;
+            }
+            if (lidar_dilated_value > 0.0f && std::isfinite(lidar_dilated_value) &&
+                rendered_valid_pixel)
+            {
+                const double absolute_error =
+                    std::abs(static_cast<double>(lidar_dilated_value) - rendered_value);
+                lidar_dilated_abs_errors.push_back(static_cast<float>(absolute_error));
+                lidar_dilated_relative_errors.push_back(static_cast<float>(
+                    absolute_error / std::max(1e-6, static_cast<double>(lidar_dilated_value))));
+                lidar_dilated_squared_error_sum += absolute_error * absolute_error;
             }
         }
     }
@@ -1039,6 +1098,8 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                    "fused_valid_fraction,rendered_valid_fraction,overlap_fraction,mae_m,rmse_m,"
                    "median_abs_m,p90_abs_m,absrel_mean,"
                    "lidar_overlap_pixels,lidar_mae_m,lidar_rmse_m,lidar_median_abs_m,lidar_p90_abs_m,lidar_absrel_mean,"
+                   "lidar_dilated_overlap_pixels,lidar_dilated_mae_m,lidar_dilated_rmse_m,"
+                   "lidar_dilated_median_abs_m,lidar_dilated_p90_abs_m,lidar_dilated_absrel_mean,"
                    "dap_fill_overlap_pixels,dap_fill_mae_m,dap_fill_rmse_m,dap_fill_median_abs_m,"
                    "dap_fill_p90_abs_m,dap_fill_absrel_mean\n";
     const double total_pixels = static_cast<double>(height) * width;
@@ -1050,7 +1111,12 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
             << lidar_abs_errors.size() << ',' << mean(lidar_abs_errors) << ','
             << regionRmse(lidar_squared_error_sum, lidar_abs_errors.size()) << ','
             << percentile(lidar_abs_errors, 0.50) << ',' << percentile(lidar_abs_errors, 0.90) << ','
-            << mean(lidar_relative_errors) << ',' << dap_fill_abs_errors.size() << ','
+            << mean(lidar_relative_errors) << ',' << lidar_dilated_abs_errors.size() << ','
+            << mean(lidar_dilated_abs_errors) << ','
+            << regionRmse(lidar_dilated_squared_error_sum, lidar_dilated_abs_errors.size()) << ','
+            << percentile(lidar_dilated_abs_errors, 0.50) << ','
+            << percentile(lidar_dilated_abs_errors, 0.90) << ','
+            << mean(lidar_dilated_relative_errors) << ',' << dap_fill_abs_errors.size() << ','
             << mean(dap_fill_abs_errors) << ',' << regionRmse(dap_fill_squared_error_sum, dap_fill_abs_errors.size()) << ','
             << percentile(dap_fill_abs_errors, 0.50) << ',' << percentile(dap_fill_abs_errors, 0.90) << ','
             << mean(dap_fill_relative_errors) << '\n';
