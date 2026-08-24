@@ -18,7 +18,7 @@ patch_size: 10
 min_point_depth: 0.40
 max_depth: 80
 
-sh_degree: 1
+sh_degree: 3
 white_background: false
 random_background: false
 convert_SHs_python: false

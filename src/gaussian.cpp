@@ -45,6 +45,33 @@ struct PixelPosition
     int u, v;
 };
 
+static cv::Mat depthEdgeMagnitude(const cv::Mat& depth, bool periodic_horizontal)
+{
+    cv::Mat gradient_x, gradient_y;
+    if (!periodic_horizontal)
+    {
+        cv::Sobel(depth, gradient_x, CV_32F, 1, 0, 3);
+        cv::Sobel(depth, gradient_y, CV_32F, 0, 1, 3);
+    }
+    else
+    {
+        // ERP longitude is periodic. Supply wrapped horizontal neighbours while
+        // retaining replicated top/bottom neighbours for the latitude boundary.
+        cv::Mat vertical_padded;
+        cv::copyMakeBorder(depth, vertical_padded, 1, 1, 0, 0, cv::BORDER_REPLICATE);
+        cv::Mat padded;
+        cv::copyMakeBorder(vertical_padded, padded, 0, 0, 1, 1, cv::BORDER_WRAP);
+        cv::Mat padded_x, padded_y;
+        cv::Sobel(padded, padded_x, CV_32F, 1, 0, 3, 1.0, 0.0, cv::BORDER_ISOLATED);
+        cv::Sobel(padded, padded_y, CV_32F, 0, 1, 3, 1.0, 0.0, cv::BORDER_ISOLATED);
+        gradient_x = padded_x(cv::Rect(1, 1, depth.cols, depth.rows)).clone();
+        gradient_y = padded_y(cv::Rect(1, 1, depth.cols, depth.rows)).clone();
+    }
+    cv::Mat magnitude;
+    cv::magnitude(gradient_x, gradient_y, magnitude);
+    return magnitude;
+}
+
 std::vector<PixelPosition> selectFromDepthCompletion(const cv::Mat& depth_A, const cv::Mat& depth_B, int patch_size = 20) 
 {
     CV_Assert(depth_A.size() == depth_B.size());
@@ -356,11 +383,7 @@ void Dataset::addFrame(Frame& cur_frame)
             if (std::abs(mean_depth_difference) < 0.1)
             {
                 // wanted_depth：non-edge && positive
-                cv::Mat depth_gradient_x, depth_gradient_y;
-                cv::Sobel(completed_depth, depth_gradient_x, CV_32F, 1, 0, 3);
-                cv::Sobel(completed_depth, depth_gradient_y, CV_32F, 0, 1, 3);
-                cv::Mat depth_edges;
-                cv::magnitude(depth_gradient_x, depth_gradient_y, depth_edges);
+                cv::Mat depth_edges = depthEdgeMagnitude(completed_depth, equirectangular_);
                 double edge_threshold = 0.1;
                 cv::Mat mask_not_edges = depth_edges < edge_threshold;  // 0/255 uint8
                 completed_depth -= mean_depth_difference;
@@ -400,11 +423,7 @@ void Dataset::addFrame(Frame& cur_frame)
             // Use the fused depth only in LiDAR blind patches. This preserves
             // the original sparse LiDAR initialization while adding a small,
             // controlled number of DAP-supported ERP Gaussians.
-            cv::Mat depth_gradient_x, depth_gradient_y;
-            cv::Sobel(depth_map, depth_gradient_x, CV_32F, 1, 0, 3);
-            cv::Sobel(depth_map, depth_gradient_y, CV_32F, 0, 1, 3);
-            cv::Mat depth_edges;
-            cv::magnitude(depth_gradient_x, depth_gradient_y, depth_edges);
+            cv::Mat depth_edges = depthEdgeMagnitude(depth_map, equirectangular_);
             cv::Mat mask_not_edges = depth_edges < 0.1;
             cv::Mat wanted_depth;
             depth_map.copyTo(wanted_depth, (depth_map >= min_point_depth_) &
@@ -898,7 +917,8 @@ void GaussianModel::densificationPostfix(
 
 static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                                const torch::Tensor& rendered_depth,
-                               const std::string& diagnosis_dir)
+                               const std::string& diagnosis_dir,
+                               const std::string& split)
 {
     auto fused_cpu = camera->diagnostic_depth_.detach().to(torch::kCPU).contiguous();
     auto rendered_cpu = rendered_depth.detach().to(torch::kCPU).contiguous();
@@ -1015,14 +1035,14 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
     std::ofstream metrics(metrics_path, std::ios::app);
     if (write_header)
-        metrics << "image_name,total_pixels,fused_valid_pixels,rendered_valid_pixels,overlap_pixels,"
+        metrics << "image_name,split,total_pixels,fused_valid_pixels,rendered_valid_pixels,overlap_pixels,"
                    "fused_valid_fraction,rendered_valid_fraction,overlap_fraction,mae_m,rmse_m,"
                    "median_abs_m,p90_abs_m,absrel_mean,"
                    "lidar_overlap_pixels,lidar_mae_m,lidar_rmse_m,lidar_median_abs_m,lidar_p90_abs_m,lidar_absrel_mean,"
                    "dap_fill_overlap_pixels,dap_fill_mae_m,dap_fill_rmse_m,dap_fill_median_abs_m,"
                    "dap_fill_p90_abs_m,dap_fill_absrel_mean\n";
     const double total_pixels = static_cast<double>(height) * width;
-    metrics << camera->image_name_ << ',' << static_cast<size_t>(total_pixels) << ','
+    metrics << camera->image_name_ << ',' << split << ',' << static_cast<size_t>(total_pixels) << ','
             << fused_valid_count << ',' << rendered_valid_count << ',' << overlap_count << ','
             << fused_valid_count / total_pixels << ',' << rendered_valid_count / total_pixels << ','
             << overlap_count / total_pixels << ',' << mae << ',' << rmse << ','
@@ -1362,7 +1382,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto render_pkg = render(train_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
-            saveDepthDiagnosis(train_camera, rendered_depth, diagnosis_dir_path);
+            saveDepthDiagnosis(train_camera, rendered_depth, diagnosis_dir_path, "train");
             auto gt_image = train_camera->original_image_.cuda().clamp(0, 1);
             const bool use_metric_mask = metric_mask.defined() && train_camera->is_equirectangular_;
             auto metric_rendered = rendered_image;
@@ -1432,6 +1452,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto render_pkg = render(test_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
+            saveDepthDiagnosis(test_camera, rendered_depth, diagnosis_dir_path, "test");
             auto gt_image = test_camera->original_image_.cuda().clamp(0, 1);
             const bool use_metric_mask = metric_mask.defined() && test_camera->is_equirectangular_;
             auto metric_rendered = rendered_image;
