@@ -106,7 +106,9 @@ public:
         lambda_depth = node["lambda_depth"].as<double>();
         iteration_decay = node["iteration_decay"].as<bool>();
 
-        apply_exposure = node["apply_exposure"].as<bool>();
+        apply_exposure = node["apply_exposure"] ? node["apply_exposure"].as<bool>() : false;
+        if (node["adaptive_exposure"])
+            apply_exposure = node["adaptive_exposure"].as<bool>();
         exposure_lr = node["exposure_lr"].as<double>();
         skybox_points_num = node["skybox_points_num"].as<int>();
         skybox_radius = node["skybox_radius"].as<int>();

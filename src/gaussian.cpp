@@ -683,8 +683,9 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
 
     if (apply_exposure_)
     {
-        torch::Tensor exposure = torch::eye(3, torch::kFloat32).cuda();
-        exposure = torch::cat({exposure, torch::zeros({3, 1}, torch::kFloat32).cuda()}, 1);
+        // The first two entries are log-gain and additive bias. The remaining
+        // entries retain the legacy tensor shape for checkpoint compatibility.
+        torch::Tensor exposure = torch::zeros({3, 4}, torch::kFloat32).cuda();
         this->exposure_ = exposure.requires_grad_();  // (3, 4)
     }
 
@@ -1276,6 +1277,12 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         ssim_value = loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
+        if (pc->apply_exposure_)
+        {
+            auto log_gain = pc->exposure_.index({0, 0});
+            auto bias = pc->exposure_.index({0, 3});
+            loss += 0.001 * (log_gain * log_gain + bias * bias);
+        }
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_forward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
@@ -1296,6 +1303,9 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         {
             pc->exposure_optimizer_->step();
             pc->exposure_optimizer_->zero_grad(true);
+            torch::NoGradGuard no_grad;
+            pc->exposure_.index_put_({0, 0}, pc->exposure_.index({0, 0}).clamp(-2.0, 2.0));
+            pc->exposure_.index_put_({0, 3}, pc->exposure_.index({0, 3}).clamp(-0.5, 0.5));
         }
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();

@@ -79,6 +79,12 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
     auto radii = std::get<1>(rasterizer_result);
     auto rendered_depth = std::get<2>(rasterizer_result);
     auto rendered_final_T = std::get<3>(rasterizer_result);
+    if (use_trained_exposure && pc->exposure_.defined())
+    {
+        const auto log_gain = pc->exposure_.index({0, 0});
+        const auto bias = pc->exposure_.index({0, 3});
+        rendered_image = torch::exp(log_gain) * rendered_image + bias;
+    }
 
     return std::make_tuple(
         rendered_image,

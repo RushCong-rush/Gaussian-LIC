@@ -37,6 +37,7 @@ lambda_depth: 0.005
 iteration_decay: true
 
 apply_exposure: false
+adaptive_exposure: true
 exposure_lr: 0.001
 skybox_points_num: 0
 skybox_radius: 1000
