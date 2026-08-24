@@ -238,6 +238,18 @@ void Dataset::addFrame(Frame& cur_frame)
         }
     }
 
+    // Preserve the metric fused depth for external RGB-D benchmarks. The
+    // existing fused_*.png files are colorized diagnostics and are not metric.
+    if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
+        export_depth != nullptr && std::string(export_depth) == "1" &&
+        !diagnosis_dir_.empty())
+    {
+        const std::string depth_dir = diagnosis_dir_ + "/depth_float";
+        fs::create_directories(depth_dir);
+        const std::string stamp = std::to_string(cur_frame.image_msg->header.stamp.toNSec());
+        cv::imwrite(depth_dir + "/" + stamp + ".exr", depth_map);
+    }
+
     /// pose
     Eigen::Quaterniond q_wc;
     Eigen::Vector3d t_wc;
