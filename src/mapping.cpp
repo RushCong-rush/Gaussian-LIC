@@ -24,9 +24,13 @@
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <iomanip>
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
+
+namespace fs = std::filesystem;
 
 std::mutex m_buf;
 std::condition_variable con;
@@ -41,6 +45,35 @@ std::atomic<bool> exit_flag(false);
 std::atomic<double> last_point_time(0.0);
 std::atomic<bool> gaussians_initialized(false);
 std::atomic<bool> online_dap_enabled(false);
+
+namespace
+{
+void saveRgbTensor(const torch::Tensor& image, const std::string& path)
+{
+    torch::Tensor image_cpu = image.detach().clamp(0, 1).to(torch::kCPU)
+                                  .permute({1, 2, 0}).contiguous()
+                                  .mul(255).clamp(0, 255).to(torch::kU8);
+    cv::Mat image_rgb(image_cpu.size(0), image_cpu.size(1), CV_8UC3,
+                      image_cpu.data_ptr<uint8_t>());
+    cv::Mat image_bgr;
+    cv::cvtColor(image_rgb, image_bgr, cv::COLOR_RGB2BGR);
+    if (!cv::imwrite(path, image_bgr))
+        throw std::runtime_error("Failed to save online RGB image: " + path);
+}
+
+void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
+                     const std::shared_ptr<GaussianModel>& gaussians,
+                     torch::Tensor& background,
+                     const std::string& render_dir,
+                     const std::string& gt_dir)
+{
+    torch::NoGradGuard no_grad;
+    const auto render_pkg = render(camera, gaussians, background,
+                                   gaussians->apply_exposure_);
+    saveRgbTensor(std::get<0>(render_pkg), render_dir + "/" + camera->image_name_);
+    saveRgbTensor(camera->original_image_, gt_dir + "/" + camera->image_name_);
+}
+}  // namespace
 
 void pointCallback(const sensor_msgs::PointCloud2ConstPtr& point_msg) 
 {
@@ -191,10 +224,22 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
     dataset->setDiagnosisDirectory(result_path + "/depth_diagnose");
 
+    const std::string online_render_dir = result_path + "/online_render";
+    const std::string online_gt_dir = result_path + "/online_gt";
+    if (fs::exists(online_render_dir)) fs::remove_all(online_render_dir);
+    if (fs::exists(online_gt_dir)) fs::remove_all(online_gt_dir);
+    fs::create_directories(online_render_dir);
+    fs::create_directories(online_gt_dir);
+    torch::Tensor online_background = prm.white_background
+        ? torch::ones({3}, torch::kFloat32).cuda()
+        : torch::zeros({3}, torch::kFloat32).cuda();
+
     std::chrono::steady_clock::time_point t_start, t_end;
     double total_mapping_time = 0;
     double total_adding_time = 0;
     double total_extending_time = 0;
+    double total_online_render_time = 0;
+    size_t online_rendered_frames = 0;
 
     Frame cur_frame;
     while (!exit_flag)
@@ -210,12 +255,29 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         dataset->addFrame(cur_frame);
         torch::cuda::synchronize();
         t_end = std::chrono::steady_clock::now();
+        const std::shared_ptr<Camera> current_camera = dataset->is_keyframe_current_
+            ? dataset->train_cameras_.back()
+            : dataset->test_cameras_.back();
         if (dataset->is_keyframe_current_)
         {
             total_adding_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
             std::cout << "\033[1;33m     Cur Frame " << dataset->all_frame_num_ - 1 << ",\033[0m";
         }
-        else continue;
+        else
+        {
+            if (gaussians->is_init_)
+            {
+                t_start = std::chrono::steady_clock::now();
+                saveOnlineFrame(current_camera, gaussians, online_background,
+                                online_render_dir, online_gt_dir);
+                torch::cuda::synchronize();
+                t_end = std::chrono::steady_clock::now();
+                total_online_render_time +=
+                    std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
+                ++online_rendered_frames;
+            }
+            continue;
+        }
 
         if (!gaussians->is_init_)
         {
@@ -244,6 +306,15 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         std::cout << std::fixed << std::setprecision(2) 
                   << "\033[1;36m Update " << updated_num / 10000 
                   << "w GS per Iter \033[0m" << std::endl;
+
+        t_start = std::chrono::steady_clock::now();
+        saveOnlineFrame(current_camera, gaussians, online_background,
+                        online_render_dir, online_gt_dir);
+        torch::cuda::synchronize();
+        t_end = std::chrono::steady_clock::now();
+        total_online_render_time +=
+            std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
+        ++online_rendered_frames;
     }
 
     /// [6] evaluation
@@ -255,6 +326,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << std::fixed << std::setprecision(2) << "         4) CPU2GPU " << gaussians->t_tocuda_ << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Adding Time] " << total_adding_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Extending Time] " << total_extending_time << "s" << std::endl;
+    std::cout << std::fixed << std::setprecision(2) << "        [Total Online Render Time] " << total_online_render_time << "s" << std::endl;
+    std::cout << "        [Online Rendered Frames] " << online_rendered_frames << std::endl;
     torch::NoGradGuard no_grad;
     evaluateVisualQuality(dataset, gaussians, result_path, lpips_path);
     gaussians->saveMap(result_path);

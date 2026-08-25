@@ -15,7 +15,7 @@ dap_topic: /depth_dap_for_gs
 # measured LiDAR alone supervises geometry during optimization.
 dap_dense_depth_supervision: false
 patch_size: 10
-min_point_depth: 0.40
+min_point_depth: 0.0
 max_depth: 80
 
 sh_degree: 3
