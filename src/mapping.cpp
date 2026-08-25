@@ -62,6 +62,7 @@ void saveRgbTensor(const torch::Tensor& image, const std::string& path)
 }
 
 void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
+                     const std::shared_ptr<Dataset>& dataset,
                      const std::shared_ptr<GaussianModel>& gaussians,
                      torch::Tensor& background,
                      const std::string& render_dir,
@@ -70,8 +71,13 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
     torch::NoGradGuard no_grad;
     const auto render_pkg = render(camera, gaussians, background,
                                    gaussians->apply_exposure_);
-    saveRgbTensor(std::get<0>(render_pkg), render_dir + "/" + camera->image_name_);
-    saveRgbTensor(camera->original_image_, gt_dir + "/" + camera->image_name_);
+    torch::Tensor valid_mask;
+    if (camera->is_equirectangular_ && dataset->metric_mask_.defined())
+        valid_mask = dataset->metric_mask_;
+    auto rendered = compositeMaskedImage(std::get<0>(render_pkg), valid_mask, background);
+    auto ground_truth = compositeMaskedImage(camera->original_image_, valid_mask, background);
+    saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
+    saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
 }
 }  // namespace
 
@@ -268,7 +274,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             if (gaussians->is_init_)
             {
                 t_start = std::chrono::steady_clock::now();
-                saveOnlineFrame(current_camera, gaussians, online_background,
+                saveOnlineFrame(current_camera, dataset, gaussians, online_background,
                                 online_render_dir, online_gt_dir);
                 torch::cuda::synchronize();
                 t_end = std::chrono::steady_clock::now();
@@ -308,7 +314,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                   << "w GS per Iter \033[0m" << std::endl;
 
         t_start = std::chrono::steady_clock::now();
-        saveOnlineFrame(current_camera, gaussians, online_background,
+        saveOnlineFrame(current_camera, dataset, gaussians, online_background,
                         online_render_dir, online_gt_dir);
         torch::cuda::synchronize();
         t_end = std::chrono::steady_clock::now();

@@ -70,8 +70,9 @@ public:
                 throw std::runtime_error("Cannot read metric mask: " + prm.metric_mask_path);
             if (mask.cols != prm.width || mask.rows != prm.height)
                 throw std::runtime_error("Metric mask size does not match configured image size: " + prm.metric_mask_path);
+            metric_mask_cv_ = mask > 127;
             cv::Mat mask_float;
-            mask.convertTo(mask_float, CV_32FC1, 1.0 / 255.0);
+            metric_mask_cv_.convertTo(mask_float, CV_32FC1, 1.0 / 255.0);
             metric_mask_ = tensor_utils::cvMat2TorchTensor_Float32(mask_float, torch::kCPU).gt(0.5);
         }
         if (depth_completion_)
@@ -100,6 +101,7 @@ public:
     bool has_previous_keyframe_pose_ = false;
     Eigen::Matrix3d previous_keyframe_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d previous_keyframe_translation_ = Eigen::Vector3d::Zero();
+    cv::Mat metric_mask_cv_;
     torch::Tensor metric_mask_;
 
 
@@ -233,3 +235,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
                            std::shared_ptr<GaussianModel>& pc,
                            const std::string& result_path,
                            const std::string& lpips_path);
+
+torch::Tensor compositeMaskedImage(const torch::Tensor& image,
+                                   const torch::Tensor& valid_mask,
+                                   const torch::Tensor& background);

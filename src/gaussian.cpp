@@ -40,6 +40,16 @@
 
 namespace fs = std::filesystem;
 
+torch::Tensor compositeMaskedImage(const torch::Tensor& image,
+                                   const torch::Tensor& valid_mask,
+                                   const torch::Tensor& background)
+{
+    if (!valid_mask.defined()) return image;
+    auto valid = valid_mask.to(image.device()).to(image.scalar_type()).unsqueeze(0);
+    auto bg = background.to(image.device()).to(image.scalar_type()).view({3, 1, 1});
+    return image * valid + bg * (1.0f - valid);
+}
+
 struct PixelPosition 
 {
     int u, v;
@@ -148,6 +158,8 @@ void Dataset::addFrame(Frame& cur_frame)
     std::vector<float> fusion_abs_errors;
     std::vector<float> fusion_relative_errors;
     size_t fusion_overlap_count = 0;
+    size_t lidar_depth_pixels_filtered_mask = 0;
+    size_t dap_depth_pixels_filtered_mask = 0;
 
     /// image
     cv_bridge::CvImagePtr cv_ptr;
@@ -161,6 +173,13 @@ void Dataset::addFrame(Frame& cur_frame)
     cv_bridge::CvImagePtr dp_ptr;
     dp_ptr = cv_bridge::toCvCopy(cur_frame.depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
     cv::Mat lidar_depth = dp_ptr->image.clone();  // metric float32, sparse LiDAR measurements
+    const bool use_erp_valid_mask = equirectangular_ && !metric_mask_cv_.empty();
+    if (use_erp_valid_mask)
+    {
+        cv::Mat filtered = (lidar_depth > 0.0f) & (metric_mask_cv_ == 0);
+        lidar_depth_pixels_filtered_mask = cv::countNonZero(filtered);
+        lidar_depth.setTo(0.0f, metric_mask_cv_ == 0);
+    }
     cv::Mat depth_map = lidar_depth.clone();
     if (cur_frame.dap_depth_msg)
     {
@@ -169,6 +188,12 @@ void Dataset::addFrame(Frame& cur_frame)
         dap_depth = dap_ptr->image.clone();
         if (dap_depth.size() != depth_map.size())
             throw std::runtime_error("DAP ERP depth size does not match the input image");
+        if (use_erp_valid_mask)
+        {
+            cv::Mat filtered = (dap_depth > 0.0f) & (metric_mask_cv_ == 0);
+            dap_depth_pixels_filtered_mask = cv::countNonZero(filtered);
+            dap_depth.setTo(0.0f, metric_mask_cv_ == 0);
+        }
 
         // Align the offline DAP metric to the current LiDAR scale, then keep
         // measured LiDAR pixels as hard anchors in the fused depth image.
@@ -334,33 +359,95 @@ void Dataset::addFrame(Frame& cur_frame)
                << translation_delta << ',' << rotation_delta_deg << '\n';
     }
 
+    const int width = image_rgb.cols;
+    const int height = image_rgb.rows;
+
     /// point
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::fromROSMsg(*cur_frame.point_msg, *cloud);
     size_t lidar_points_filtered_near = 0;
+    size_t lidar_points_filtered_mask = 0;
     size_t lidar_points_kept = 0;
+    const Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
+    const Eigen::Vector3d t_cw = -R_cw * t_wc;
     for (const auto& pt : cloud->points)
     {
-        Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
-        Eigen::Vector3d t_cw = - R_cw * t_wc;
         Eigen::Vector3d pt_w(pt.x, pt.y, pt.z);
         Eigen::Vector3d pt_c = R_cw * pt_w + t_cw;
         const double point_depth = equirectangular_ ? pt_c.norm() : pt_c(2);
+        Eigen::Vector3d point_color(pt.r / 255.0, pt.g / 255.0, pt.b / 255.0);
         if (point_depth < min_point_depth_)
         {
             ++lidar_points_filtered_near;
             continue;
         }
+        if (use_erp_valid_mask)
+        {
+            const double longitude = std::atan2(pt_c(0), pt_c(2));
+            const double latitude = std::atan2(
+                -pt_c(1), std::hypot(pt_c(0), pt_c(2)));
+            double u = std::fmod(
+                (longitude / M_PI + 1.0) * 0.5 * width, width);
+            if (u < 0.0) u += width;
+            const double v = (0.5 - latitude / M_PI) * height;
+            const int mask_u = (static_cast<int>(std::lround(u)) % width + width) % width;
+            const int mask_v = static_cast<int>(std::lround(v));
+            if (mask_v < 0 || mask_v >= height ||
+                metric_mask_cv_.at<uint8_t>(mask_v, mask_u) == 0)
+            {
+                ++lidar_points_filtered_mask;
+                continue;
+            }
+
+            const int u0 = static_cast<int>(std::floor(u));
+            const int u1 = (u0 + 1) % width;
+            const int v0 = std::clamp(static_cast<int>(std::floor(v)), 0, height - 1);
+            const int v1 = std::min(v0 + 1, height - 1);
+            const double du = u - u0;
+            const double dv = v - v0;
+            Eigen::Vector3d weighted_color = Eigen::Vector3d::Zero();
+            double valid_weight = 0.0;
+            auto add_color = [&](int sample_u, int sample_v, double weight) {
+                if (weight <= 0.0 || metric_mask_cv_.at<uint8_t>(sample_v, sample_u) == 0)
+                    return;
+                const cv::Vec3f color = image_rgb.at<cv::Vec3f>(sample_v, sample_u);
+                weighted_color += weight * Eigen::Vector3d(color[0], color[1], color[2]);
+                valid_weight += weight;
+            };
+            add_color(u0, v0, (1.0 - du) * (1.0 - dv));
+            add_color(u1, v0, du * (1.0 - dv));
+            add_color(u0, v1, (1.0 - du) * dv);
+            add_color(u1, v1, du * dv);
+            point_color = weighted_color / valid_weight;
+        }
         pointcloud_.emplace_back(pt_w);
-        pointcolor_.emplace_back(Eigen::Vector3d(pt.r, pt.g, pt.b) / 255.0);
+        pointcolor_.emplace_back(point_color);
         ++lidar_points_kept;
         if (!equirectangular_)
             assert(pt_c(2) > 0);
         pointdepth_.push_back(static_cast<float>(point_depth));
     }
 
+    if (use_erp_valid_mask && !diagnosis_dir_.empty())
+    {
+        fs::create_directories(diagnosis_dir_);
+        const std::string path = diagnosis_dir_ + "/erp_mask_filter_metrics.csv";
+        const bool write_header = !fs::exists(path) || fs::file_size(path) == 0;
+        std::ofstream stream(path, std::ios::app);
+        if (write_header)
+            stream << "frame_index,timestamp_ns,is_keyframe,valid_mask_pixels,total_pixels,"
+                      "lidar_depth_pixels_filtered_mask,dap_depth_pixels_filtered_mask,"
+                      "lidar_input_points,lidar_points_filtered_near,lidar_points_filtered_mask,"
+                      "lidar_points_kept\n";
+        stream << frame_index << ',' << cur_frame.image_msg->header.stamp.toNSec() << ','
+               << (is_keyframe ? 1 : 0) << ',' << cv::countNonZero(metric_mask_cv_) << ','
+               << metric_mask_cv_.total() << ',' << lidar_depth_pixels_filtered_mask << ','
+               << dap_depth_pixels_filtered_mask << ',' << cloud->size() << ','
+               << lidar_points_filtered_near << ',' << lidar_points_filtered_mask << ','
+               << lidar_points_kept << '\n';
+    }
+
     /// train & test
-    int width = image_rgb.cols, height = image_rgb.rows;
     cv::Mat lidar_valid_mask = lidar_depth > 0.0f;
     auto lidar_valid_tensor = torch::from_blob(
         lidar_valid_mask.data, {height, width}, torch::TensorOptions().dtype(torch::kUInt8)).clone();
@@ -388,6 +475,7 @@ void Dataset::addFrame(Frame& cur_frame)
                 cv::Mat mask_not_edges = depth_edges < edge_threshold;  // 0/255 uint8
                 completed_depth -= mean_depth_difference;
                 cv::Mat mask = (completed_depth > 0) & mask_not_edges;  // 0/255 uint8
+                if (use_erp_valid_mask) mask &= metric_mask_cv_;
                 cv::Mat wanted_depth;
                 completed_depth.copyTo(wanted_depth, mask);
 
@@ -425,9 +513,11 @@ void Dataset::addFrame(Frame& cur_frame)
             // controlled number of DAP-supported ERP Gaussians.
             cv::Mat depth_edges = depthEdgeMagnitude(depth_map, equirectangular_);
             cv::Mat mask_not_edges = depth_edges < 0.1;
+            cv::Mat seed_mask = (depth_map >= min_point_depth_) &
+                                mask_not_edges & (depth_map < max_depth_);
+            if (use_erp_valid_mask) seed_mask &= metric_mask_cv_;
             cv::Mat wanted_depth;
-            depth_map.copyTo(wanted_depth, (depth_map >= min_point_depth_) &
-                                         mask_not_edges & (depth_map < max_depth_));
+            depth_map.copyTo(wanted_depth, seed_mask);
 
             cv::Mat seed_lidar_depth = lidar_depth;
             if (dap_seed_lidar_dilation_pixels_ > 0)
@@ -918,7 +1008,8 @@ void GaussianModel::densificationPostfix(
 static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                                const torch::Tensor& rendered_depth,
                                const std::string& diagnosis_dir,
-                               const std::string& split)
+                               const std::string& split,
+                               const cv::Mat& image_valid_mask)
 {
     auto fused_cpu = camera->diagnostic_depth_.detach().to(torch::kCPU).contiguous();
     auto rendered_cpu = rendered_depth.detach().to(torch::kCPU).contiguous();
@@ -928,7 +1019,12 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     cv::Mat rendered(height, width, CV_32FC1, rendered_cpu.data_ptr<float>());
     auto lidar_mask_cpu = camera->lidar_valid_mask_.detach().to(torch::kCPU).contiguous();
     cv::Mat lidar_mask(height, width, CV_8UC1, lidar_mask_cpu.data_ptr<uint8_t>());
-    cv::Mat valid = (fused > 0.0f) & (rendered > 0.0f);
+    cv::Mat valid_region;
+    if (camera->is_equirectangular_ && !image_valid_mask.empty())
+        valid_region = image_valid_mask;
+    else
+        valid_region = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+    cv::Mat valid = (fused > 0.0f) & (rendered > 0.0f) & valid_region;
 
     constexpr int lidar_dilation_radius = 1;
     cv::Mat lidar_dilated_depth = cv::Mat::zeros(height, width, CV_32FC1);
@@ -955,6 +1051,8 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                     if (camera->is_equirectangular_)
                         target_x = (target_x % width + width) % width;
                     else if (target_x < 0 || target_x >= width)
+                        continue;
+                    if (valid_region.at<uint8_t>(target_y, target_x) == 0)
                         continue;
 
                     const int distance = dx * dx + dy * dy;
@@ -985,16 +1083,18 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     };
 
     cv::Mat fused_valid, rendered_valid;
-    fused.copyTo(fused_valid, fused > 0.0f);
-    rendered.copyTo(rendered_valid, rendered > 0.0f);
+    cv::Mat fused_valid_mask = (fused > 0.0f) & valid_region;
+    cv::Mat rendered_valid_mask = (rendered > 0.0f) & valid_region;
+    fused.copyTo(fused_valid, fused_valid_mask);
+    rendered.copyTo(rendered_valid, rendered_valid_mask);
     double fused_max = 0.0, rendered_max = 0.0;
     cv::minMaxLoc(fused_valid, nullptr, &fused_max);
     cv::minMaxLoc(rendered_valid, nullptr, &rendered_max);
     const double visualization_max = std::max(1.0, std::min(80.0, std::max(fused_max, rendered_max)));
     cv::Mat difference = cv::abs(fused - rendered);
     difference.setTo(0, ~valid);
-    cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused > 0.0f, visualization_max));
-    cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered > 0.0f, visualization_max));
+    cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused_valid_mask, visualization_max));
+    cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered_valid_mask, visualization_max));
     cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
 
     std::vector<float> abs_errors;
@@ -1025,8 +1125,10 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
         const float* rendered_row = rendered.ptr<float>(y);
         const float* lidar_dilated_row = lidar_dilated_depth.ptr<float>(y);
         const uint8_t* lidar_mask_row = lidar_mask.ptr<uint8_t>(y);
+        const uint8_t* valid_region_row = valid_region.ptr<uint8_t>(y);
         for (int x = 0; x < width; ++x)
         {
+            if (valid_region_row[x] == 0) continue;
             const float fused_value = fused_row[x];
             const float rendered_value = rendered_row[x];
             const float lidar_dilated_value = lidar_dilated_row[x];
@@ -1094,7 +1196,7 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
     std::ofstream metrics(metrics_path, std::ios::app);
     if (write_header)
-        metrics << "image_name,split,total_pixels,fused_valid_pixels,rendered_valid_pixels,overlap_pixels,"
+        metrics << "image_name,split,total_pixels,image_valid_pixels,fused_valid_pixels,rendered_valid_pixels,overlap_pixels,"
                    "fused_valid_fraction,rendered_valid_fraction,overlap_fraction,mae_m,rmse_m,"
                    "median_abs_m,p90_abs_m,absrel_mean,"
                    "lidar_overlap_pixels,lidar_mae_m,lidar_rmse_m,lidar_median_abs_m,lidar_p90_abs_m,lidar_absrel_mean,"
@@ -1102,11 +1204,13 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
                    "lidar_dilated_median_abs_m,lidar_dilated_p90_abs_m,lidar_dilated_absrel_mean,"
                    "dap_fill_overlap_pixels,dap_fill_mae_m,dap_fill_rmse_m,dap_fill_median_abs_m,"
                    "dap_fill_p90_abs_m,dap_fill_absrel_mean\n";
-    const double total_pixels = static_cast<double>(height) * width;
-    metrics << camera->image_name_ << ',' << split << ',' << static_cast<size_t>(total_pixels) << ','
+    const size_t total_pixels = static_cast<size_t>(height) * width;
+    const double image_valid_pixels = cv::countNonZero(valid_region);
+    metrics << camera->image_name_ << ',' << split << ',' << total_pixels << ','
+            << static_cast<size_t>(image_valid_pixels) << ','
             << fused_valid_count << ',' << rendered_valid_count << ',' << overlap_count << ','
-            << fused_valid_count / total_pixels << ',' << rendered_valid_count / total_pixels << ','
-            << overlap_count / total_pixels << ',' << mae << ',' << rmse << ','
+            << fused_valid_count / image_valid_pixels << ',' << rendered_valid_count / image_valid_pixels << ','
+            << overlap_count / image_valid_pixels << ',' << mae << ',' << rmse << ','
             << percentile(abs_errors, 0.50) << ',' << percentile(abs_errors, 0.90) << ',' << absrel << ','
             << lidar_abs_errors.size() << ',' << mean(lidar_abs_errors) << ','
             << regionRmse(lidar_squared_error_sum, lidar_abs_errors.size()) << ','
@@ -1335,6 +1439,9 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
     else bg = torch::zeros({3}, torch::kFloat32).cuda();
+    torch::Tensor image_valid_mask;
+    if (dataset->equirectangular_ && dataset->metric_mask_.defined())
+        image_valid_mask = dataset->metric_mask_.to(torch::kCUDA);
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
@@ -1351,15 +1458,30 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_);
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
-        auto mask = (gt_depth > 0) & (rendered_depth > 0);
-        auto Ll1 = loss_utils::l1_loss(rendered_image, gt_image);
-        auto Ll1_depth = torch::abs(rendered_depth.masked_select(mask) - gt_depth.masked_select(mask)).mean();
+        const bool use_image_valid_mask =
+            image_valid_mask.defined() && viewpoint_cam->is_equirectangular_;
+        auto depth_mask = (gt_depth > 0) & (rendered_depth > 0);
+        if (use_image_valid_mask) depth_mask &= image_valid_mask;
+        auto Ll1 = use_image_valid_mask
+            ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
+            : loss_utils::l1_loss(rendered_image, gt_image);
+        auto Ll1_depth = torch::abs(
+            rendered_depth.masked_select(depth_mask) - gt_depth.masked_select(depth_mask)).mean();
         float lambda_dssim = pc->lambda_dssim_;
         float lambda_depth = pc->lambda_depth_;
         torch::Tensor ssim_value;
-        torch::Tensor rendered_image_unsq = rendered_image.unsqueeze(0);
-        torch::Tensor gt_image_unsq = gt_image.unsqueeze(0);
-        ssim_value = loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
+        auto ssim_rendered = use_image_valid_mask
+            ? compositeMaskedImage(rendered_image, image_valid_mask, bg)
+            : rendered_image;
+        auto ssim_gt = use_image_valid_mask
+            ? compositeMaskedImage(gt_image, image_valid_mask, bg)
+            : gt_image;
+        torch::Tensor rendered_image_unsq = ssim_rendered.unsqueeze(0);
+        torch::Tensor gt_image_unsq = ssim_gt.unsqueeze(0);
+        ssim_value = use_image_valid_mask
+            ? loss_utils::fused_ssim_masked(
+                rendered_image_unsq, gt_image_unsq, image_valid_mask)
+            : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
         torch::cuda::synchronize();
@@ -1448,16 +1570,16 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto render_pkg = render(train_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
-            saveDepthDiagnosis(train_camera, rendered_depth, diagnosis_dir_path, "train");
+            saveDepthDiagnosis(train_camera, rendered_depth, diagnosis_dir_path, "train",
+                               dataset->metric_mask_cv_);
             auto gt_image = train_camera->original_image_.cuda().clamp(0, 1);
             const bool use_metric_mask = metric_mask.defined() && train_camera->is_equirectangular_;
             auto metric_rendered = rendered_image;
             auto metric_gt = gt_image;
             if (use_metric_mask)
             {
-                auto mask = metric_mask.unsqueeze(0);
-                metric_rendered = rendered_image * mask;
-                metric_gt = gt_image * mask;
+                metric_rendered = compositeMaskedImage(rendered_image, metric_mask, bg);
+                metric_gt = compositeMaskedImage(gt_image, metric_mask, bg);
             }
             double psnr = use_metric_mask
                 ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
@@ -1482,20 +1604,23 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
 
             int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+            torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
             cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
             cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
             cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
 
-            torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+            torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
             cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
             cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
             cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
 
-            torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) / 
-                                                     (rendered_depth.max() - rendered_depth.min()) * 255;
+            auto output_depth = use_metric_mask
+                ? rendered_depth.masked_fill(~metric_mask, 0.0f)
+                : rendered_depth;
+            torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
+                                                     (output_depth.max() - output_depth.min()) * 255;
             torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
             cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
             c_img.convertTo(c_img, CV_8UC1);
@@ -1518,16 +1643,16 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             auto render_pkg = render(test_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
-            saveDepthDiagnosis(test_camera, rendered_depth, diagnosis_dir_path, "test");
+            saveDepthDiagnosis(test_camera, rendered_depth, diagnosis_dir_path, "test",
+                               dataset->metric_mask_cv_);
             auto gt_image = test_camera->original_image_.cuda().clamp(0, 1);
             const bool use_metric_mask = metric_mask.defined() && test_camera->is_equirectangular_;
             auto metric_rendered = rendered_image;
             auto metric_gt = gt_image;
             if (use_metric_mask)
             {
-                auto mask = metric_mask.unsqueeze(0);
-                metric_rendered = rendered_image * mask;
-                metric_gt = gt_image * mask;
+                metric_rendered = compositeMaskedImage(rendered_image, metric_mask, bg);
+                metric_gt = compositeMaskedImage(gt_image, metric_mask, bg);
             }
             double psnr = use_metric_mask
                 ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
@@ -1552,20 +1677,23 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
 
             int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+            torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
             cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
             cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
             cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
 
-            torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+            torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
             cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
             cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
             cv::imwrite(gt_dir_path + "/" + test_camera->image_name_, b_img);
 
-            torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) / 
-                                                     (rendered_depth.max() - rendered_depth.min()) * 255;
+            auto output_depth = use_metric_mask
+                ? rendered_depth.masked_fill(~metric_mask, 0.0f)
+                : rendered_depth;
+            torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
+                                                     (output_depth.max() - output_depth.min()) * 255;
             torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
             cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
             c_img.convertTo(c_img, CV_8UC1);

@@ -32,6 +32,13 @@ inline torch::Tensor l1_loss(torch::Tensor &network_output, torch::Tensor &gt)
     return torch::abs(network_output - gt).mean();
 }
 
+inline torch::Tensor masked_l1_loss(
+    torch::Tensor &network_output, torch::Tensor &gt, torch::Tensor &mask)
+{
+    auto valid = mask.unsqueeze(0).expand_as(network_output);
+    return torch::abs(network_output - gt).masked_select(valid).mean();
+}
+
 inline torch::Tensor psnr(torch::Tensor &img1, torch::Tensor &img2)
 {
     auto mse = torch::pow(img1 - img2, 2).mean();
@@ -217,6 +224,15 @@ inline torch::Tensor fused_ssim(torch::Tensor& img1, torch::Tensor& img2)
 {    
     torch::Tensor map = FusedSSIMMap::apply(C1, C2, img1, img2);
     return map.mean();
+}
+
+inline torch::Tensor fused_ssim_masked(
+    torch::Tensor& img1, torch::Tensor& img2, torch::Tensor& mask)
+{
+    torch::Tensor map = FusedSSIMMap::apply(C1, C2, img1, img2);
+    auto weights = mask.to(map.device()).to(map.dtype())
+        .unsqueeze(0).unsqueeze(0).expand_as(map);
+    return (map * weights).sum() / weights.sum().clamp_min(1.0f);
 }
 
 }
