@@ -22,7 +22,8 @@ struct RenderResult
     int rendered;
 };
 
-RenderResult renderSingle(const float x, const float y, const float z, const bool equirectangular)
+RenderResult renderSingle(const float x, const float y, const float z,
+                          const bool equirectangular, const bool no_color = false)
 {
     const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     auto background = torch::zeros({3}, options);
@@ -41,7 +42,7 @@ RenderResult renderSingle(const float x, const float y, const float z, const boo
         background, means, colors, opacity, scales, rotations, 1.0f, empty,
         view, projection, 1.0f, 1.0f, kHeight, kWidth,
         -1.0f, 1.0f, -1.0f, 1.0f, dc, empty, 0, camera_position,
-        false, true, false, equirectangular);
+        false, true, no_color, equirectangular);
 
     auto transmittance = std::get<3>(result).cpu();
     return {1.0f - transmittance, std::get<4>(result).cpu(), std::get<5>(result).cpu(), std::get<0>(result)};
@@ -317,6 +318,11 @@ int main(int argc, char** argv)
 
     const float center_depth = forward.depth.index({kHeight / 2, kWidth / 2}).item<float>();
     require(std::abs(center_depth - 4.0f) < 1.0e-3f, "ERP depth is not radial distance");
+    const auto no_color_forward = renderSingle(0.0f, 0.0f, 4.0f, true, true);
+    require(torch::allclose(no_color_forward.alpha, forward.alpha),
+            "no-color ERP alpha differs from the full render");
+    require(torch::allclose(no_color_forward.depth, forward.depth),
+            "no-color ERP depth differs from the full render");
 
     const auto pole = renderSingle(0.0f, -4.0f, 1.0e-3f, true);
     require(torch::isfinite(pole.alpha).all().item<bool>(), "near-pole alpha contains NaN or Inf");

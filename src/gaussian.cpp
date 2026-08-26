@@ -40,6 +40,87 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+bool mapExtensionDiagnosisEnabled()
+{
+    const char* value = std::getenv("ODGS_MAP_EXTENSION_DIAG");
+    return value != nullptr && std::string(value) == "1";
+}
+
+bool depthAwareMapExtensionEnabled()
+{
+    const char* value = std::getenv("ODGS_DEPTH_AWARE_EXTENSION");
+    return value != nullptr && std::string(value) == "1";
+}
+
+double tensorMeanOrNaN(const torch::Tensor& values)
+{
+    return values.numel() > 0
+        ? values.mean().item<double>()
+        : std::numeric_limits<double>::quiet_NaN();
+}
+
+double tensorMedianOrNaN(const torch::Tensor& values)
+{
+    return values.numel() > 0
+        ? values.median().item<double>()
+        : std::numeric_limits<double>::quiet_NaN();
+}
+
+void saveMapExtensionImages(const torch::Tensor& depth,
+                            const torch::Tensor& alpha,
+                            const torch::Tensor& valid_mask,
+                            const std::string& diagnosis_dir,
+                            int frame_index)
+{
+    const std::string depth_dir = diagnosis_dir + "/extension_pre_depth";
+    const std::string alpha_dir = diagnosis_dir + "/extension_pre_alpha";
+    fs::create_directories(depth_dir);
+    fs::create_directories(alpha_dir);
+
+    auto depth_cpu = depth.detach().squeeze().to(torch::kCPU).contiguous();
+    auto alpha_cpu = alpha.detach().squeeze().to(torch::kCPU).contiguous();
+    const int height = static_cast<int>(depth_cpu.size(0));
+    const int width = static_cast<int>(depth_cpu.size(1));
+    cv::Mat depth_mat(height, width, CV_32FC1, depth_cpu.data_ptr<float>());
+    cv::Mat alpha_mat(height, width, CV_32FC1, alpha_cpu.data_ptr<float>());
+    depth_mat = depth_mat.clone();
+    alpha_mat = alpha_mat.clone();
+    cv::patchNaNs(depth_mat, 0.0);
+    cv::patchNaNs(alpha_mat, 0.0);
+
+    cv::Mat valid_region(height, width, CV_8UC1, cv::Scalar(255));
+    if (valid_mask.defined())
+    {
+        auto mask_cpu = valid_mask.detach().to(torch::kCPU).to(torch::kUInt8).contiguous();
+        cv::Mat mask_mat(height, width, CV_8UC1, mask_cpu.data_ptr<uint8_t>());
+        valid_region = mask_mat.clone() * 255;
+    }
+
+    cv::Mat clipped_depth;
+    cv::max(depth_mat, 0.0, clipped_depth);
+    cv::min(clipped_depth, 80.0, clipped_depth);
+    cv::Mat depth_u8;
+    clipped_depth.convertTo(depth_u8, CV_8UC1, 255.0 / 80.0);
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_u8, depth_color, cv::COLORMAP_TURBO);
+    depth_color.setTo(cv::Scalar(0, 0, 0), (depth_mat <= 0.0f) | (valid_region == 0));
+
+    cv::Mat clipped_alpha;
+    cv::max(alpha_mat, 0.0, clipped_alpha);
+    cv::min(clipped_alpha, 1.0, clipped_alpha);
+    cv::Mat alpha_u8;
+    clipped_alpha.convertTo(alpha_u8, CV_8UC1, 255.0);
+    alpha_u8.setTo(0, valid_region == 0);
+
+    std::ostringstream name;
+    name << std::setw(4) << std::setfill('0') << frame_index << ".jpg";
+    cv::imwrite(depth_dir + "/" + name.str(), depth_color);
+    cv::imwrite(alpha_dir + "/" + name.str(), alpha_u8);
+}
+}  // namespace
+
 torch::Tensor compositeMaskedImage(const torch::Tensor& image,
                                    const torch::Tensor& valid_mask,
                                    const torch::Tensor& background)
@@ -499,6 +580,7 @@ void Dataset::addFrame(Frame& cur_frame)
                     pointcloud_.emplace_back(world_point);
                     pointcolor_.emplace_back(eigen_color);
                     pointdepth_.emplace_back(static_cast<float>(depth));
+                    ++dap_seed_count_;
                 }
             }
             else
@@ -551,6 +633,7 @@ void Dataset::addFrame(Frame& cur_frame)
                 pointcloud_.emplace_back(world_point);
                 pointcolor_.emplace_back(Eigen::Vector3d(color[0], color[1], color[2]));
                 pointdepth_.emplace_back(depth);
+                ++dap_seed_count_;
             }
         }
 
@@ -622,6 +705,7 @@ GaussianModel::GaussianModel(const Params& prm)
     compute_cov3D_python_ = prm.compute_cov3D_python;
     lambda_erank_ = prm.lambda_erank;
     scaling_scale_ = prm.scaling_scale;
+    map_extension_min_depth_gap_m_ = prm.map_extension_min_depth_gap_m;
 
     position_lr_ = prm.position_lr;
     feature_lr_ = prm.feature_lr;
@@ -807,6 +891,7 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     dataset->pointcloud_.clear();
     dataset->pointcolor_.clear();
     dataset->pointdepth_.clear();
+    dataset->dap_seed_count_ = 0;
 }
 
 void GaussianModel::saveMap(const std::string& result_path)
@@ -1237,6 +1322,10 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto rendered_alpha = 1 - std::get<2>(render_pkg).squeeze(0);
 
     int n = dataset->pointcloud_.size();
+    const int64_t raw_dap_candidates = static_cast<int64_t>(dataset->dap_seed_count_);
+    const int64_t raw_lidar_candidates = static_cast<int64_t>(n) - raw_dap_candidates;
+    if (raw_lidar_candidates < 0)
+        throw std::runtime_error("DAP seed count exceeds the map-extension candidate count");
     std::vector<float> float_point(n * 3);
     std::vector<float> float_color(n * 3);
     for (size_t i = 0; i < n; ++i) 
@@ -1331,32 +1420,125 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto filtered_colors = colors.index_select(0, keep_indices_tensor);
     auto filtered_depths_in_rsp_frame = depths_in_rsp_frame.index_select(0, keep_indices_tensor);
     auto filtered_pixels = pixels.index_select(0, keep_indices_tensor);
+    auto filtered_projected_depths = depths.index_select(0, keep_indices_tensor);
+    auto filtered_is_dap = keep_indices_tensor >= raw_lidar_candidates;
 
-    auto filter = [H, W, &rendered_alpha](const torch::Tensor& points, 
-                                        const torch::Tensor& colors, 
-                                        const torch::Tensor& depths_in_rsp_frame, 
-                                        const torch::Tensor& pixels) 
+    auto in_image = (filtered_pixels.index({torch::indexing::Slice(), 0}) >= 0) &
+                    (filtered_pixels.index({torch::indexing::Slice(), 0}) < W) &
+                    (filtered_pixels.index({torch::indexing::Slice(), 1}) >= 0) &
+                    (filtered_pixels.index({torch::indexing::Slice(), 1}) < H);
+    auto positive_depth = filtered_depths_in_rsp_frame > 0;
+    auto geometrically_valid = in_image & positive_depth;
+    auto x_coords = filtered_pixels.index({torch::indexing::Slice(), 0}).clamp(0, W - 1);
+    auto y_coords = filtered_pixels.index({torch::indexing::Slice(), 1}).clamp(0, H - 1);
+    auto candidate_alpha = rendered_alpha.index({y_coords, x_coords});
+    auto alpha_open = candidate_alpha < 0.99;
+    auto rendered_depth = std::get<1>(render_pkg).squeeze(0);
+    auto candidate_rendered_depth = rendered_depth.index({y_coords, x_coords});
+    const auto rendered_depth_valid = torch::isfinite(candidate_rendered_depth) &
+                                      (candidate_rendered_depth > 0.0);
+    auto closer_depth_threshold = torch::maximum(
+        torch::full_like(filtered_projected_depths, pc->map_extension_min_depth_gap_m_),
+        0.1 * filtered_projected_depths);
+    auto closer_depth_conflict = rendered_depth_valid &
+        (filtered_projected_depths + closer_depth_threshold < candidate_rendered_depth);
+    auto depth_rescued = geometrically_valid & (~alpha_open) & closer_depth_conflict;
+    if (!depthAwareMapExtensionEnabled()) depth_rescued = torch::zeros_like(depth_rescued);
+    auto valid_flag = geometrically_valid & (alpha_open | depth_rescued);
+
+    auto filtered_pkg = std::make_tuple(
+        filtered_points.index({valid_flag, torch::indexing::Slice()}),
+        filtered_colors.index({valid_flag, torch::indexing::Slice()}),
+        filtered_depths_in_rsp_frame.index({valid_flag}));
+
+    if (mapExtensionDiagnosisEnabled() && !dataset->diagnosis_dir_.empty())
     {
-        auto in_image = (pixels.index({torch::indexing::Slice(), 0}) >= 0) & 
-                        (pixels.index({torch::indexing::Slice(), 0}) < W) &
-                        (pixels.index({torch::indexing::Slice(), 1}) >= 0) & 
-                        (pixels.index({torch::indexing::Slice(), 1}) < H);  // (n) bool
-        
-        auto positive_depth = depths_in_rsp_frame > 0;
+        fs::create_directories(dataset->diagnosis_dir_);
+        const int frame_index = dataset->all_frame_num_ - 1;
+        const auto is_lidar = ~filtered_is_dap;
+        const auto alpha_blocked = geometrically_valid & (~alpha_open);
+        const auto alpha_rejected = alpha_blocked & (~depth_rescued);
+        const auto accepted_lidar = valid_flag & is_lidar;
+        const auto accepted_dap = valid_flag & filtered_is_dap;
+        const auto blocked_lidar = alpha_blocked & is_lidar;
+        const auto blocked_dap = alpha_blocked & filtered_is_dap;
+        const auto rescued_lidar = depth_rescued & is_lidar;
+        const auto rescued_dap = depth_rescued & filtered_is_dap;
+        const auto blocked_depth_valid = alpha_blocked &
+            rendered_depth_valid &
+            torch::isfinite(filtered_projected_depths) & (filtered_projected_depths > 0.0);
+        auto depth_abs_difference = torch::abs(candidate_rendered_depth - filtered_projected_depths);
+        auto depth_relative_difference = depth_abs_difference /
+            torch::clamp_min(filtered_projected_depths, 1e-6);
+        auto blocked_abs_difference = depth_abs_difference.masked_select(blocked_depth_valid);
+        auto blocked_relative_difference = depth_relative_difference.masked_select(blocked_depth_valid);
+        const auto depth_conflict = blocked_depth_valid &
+            (depth_abs_difference > 0.5) & (depth_relative_difference > 0.05);
+        const auto candidate_closer_conflict = depth_conflict &
+            (filtered_projected_depths + 0.5 < candidate_rendered_depth);
+        const auto candidate_farther_conflict = depth_conflict &
+            (filtered_projected_depths > candidate_rendered_depth + 0.5);
+        const auto conflict_lidar = depth_conflict & is_lidar;
+        const auto conflict_dap = depth_conflict & filtered_is_dap;
+        const auto closer_conflict_lidar = candidate_closer_conflict & is_lidar;
+        const auto closer_conflict_dap = candidate_closer_conflict & filtered_is_dap;
+        const auto farther_conflict_lidar = candidate_farther_conflict & is_lidar;
+        const auto farther_conflict_dap = candidate_farther_conflict & filtered_is_dap;
 
-        auto x_coords = pixels.index({torch::indexing::Slice(), 0}).clamp(0, W - 1);
-        auto y_coords = pixels.index({torch::indexing::Slice(), 1}).clamp(0, H - 1);
-        auto opaque = rendered_alpha.index({y_coords, x_coords}) < 0.99;  // (n) bool
+        torch::Tensor valid_alpha = rendered_alpha.flatten();
+        torch::Tensor diagnosis_mask;
+        if (dataset->metric_mask_.defined())
+        {
+            diagnosis_mask = dataset->metric_mask_.to(rendered_alpha.device());
+            valid_alpha = rendered_alpha.masked_select(diagnosis_mask);
+        }
+        const double alpha_ge_050 = (valid_alpha >= 0.50).to(torch::kFloat32).mean().item<double>();
+        const double alpha_ge_090 = (valid_alpha >= 0.90).to(torch::kFloat32).mean().item<double>();
+        const double alpha_ge_099 = (valid_alpha >= 0.99).to(torch::kFloat32).mean().item<double>();
 
-        auto valid_flag = torch::logical_and(torch::logical_and(in_image, positive_depth), opaque);
-        auto filtered_points = points.index({valid_flag, torch::indexing::Slice()});
-        auto filtered_colors = colors.index({valid_flag, torch::indexing::Slice()});
-        auto filtered_depths = depths_in_rsp_frame.index({valid_flag});
-        return std::make_tuple(filtered_points, filtered_colors, filtered_depths);
-    };
+        const std::string metrics_path = dataset->diagnosis_dir_ + "/map_extension_metrics.csv";
+        const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
+        std::ofstream metrics(metrics_path, std::ios::app);
+        if (write_header)
+            metrics << "frame_index,map_gaussians_before,raw_candidates,raw_lidar_candidates,raw_dap_candidates,"
+                       "pixel_deduplicated_candidates,deduplicated_lidar_candidates,deduplicated_dap_candidates,"
+                       "invalid_projection_or_depth,alpha_blocked_candidates,alpha_blocked_lidar,alpha_blocked_dap,"
+                       "depth_rescued_candidates,depth_rescued_lidar,depth_rescued_dap,alpha_rejected_candidates,"
+                       "accepted_candidates,accepted_lidar,accepted_dap,valid_alpha_pixels,alpha_ge_050_fraction,"
+                       "alpha_ge_090_fraction,alpha_ge_099_fraction,blocked_depth_valid,blocked_depth_abs_mean_m,"
+                       "blocked_depth_abs_median_m,blocked_depth_rel_mean,blocked_depth_rel_median,"
+                       "blocked_depth_conflicts,blocked_depth_conflicts_lidar,blocked_depth_conflicts_dap,"
+                       "candidate_closer_conflicts,candidate_closer_conflicts_lidar,candidate_closer_conflicts_dap,"
+                       "candidate_farther_conflicts,candidate_farther_conflicts_lidar,candidate_farther_conflicts_dap\n";
+        metrics << frame_index << ',' << pc->getXYZ().size(0) << ',' << n << ','
+                << raw_lidar_candidates << ',' << raw_dap_candidates << ','
+                << keep_indices_tensor.size(0) << ','
+                << (is_lidar).sum().item<int64_t>() << ',' << filtered_is_dap.sum().item<int64_t>() << ','
+                << (~geometrically_valid).sum().item<int64_t>() << ','
+                << alpha_blocked.sum().item<int64_t>() << ',' << blocked_lidar.sum().item<int64_t>() << ','
+                << blocked_dap.sum().item<int64_t>() << ','
+                << depth_rescued.sum().item<int64_t>() << ',' << rescued_lidar.sum().item<int64_t>() << ','
+                << rescued_dap.sum().item<int64_t>() << ',' << alpha_rejected.sum().item<int64_t>() << ','
+                << valid_flag.sum().item<int64_t>() << ','
+                << accepted_lidar.sum().item<int64_t>() << ',' << accepted_dap.sum().item<int64_t>() << ','
+                << valid_alpha.numel() << ',' << alpha_ge_050 << ',' << alpha_ge_090 << ',' << alpha_ge_099 << ','
+                << blocked_depth_valid.sum().item<int64_t>() << ','
+                << tensorMeanOrNaN(blocked_abs_difference) << ','
+                << tensorMedianOrNaN(blocked_abs_difference) << ','
+                << tensorMeanOrNaN(blocked_relative_difference) << ','
+                << tensorMedianOrNaN(blocked_relative_difference) << ','
+                << depth_conflict.sum().item<int64_t>() << ','
+                << conflict_lidar.sum().item<int64_t>() << ',' << conflict_dap.sum().item<int64_t>() << ','
+                << candidate_closer_conflict.sum().item<int64_t>() << ','
+                << closer_conflict_lidar.sum().item<int64_t>() << ','
+                << closer_conflict_dap.sum().item<int64_t>() << ','
+                << candidate_farther_conflict.sum().item<int64_t>() << ','
+                << farther_conflict_lidar.sum().item<int64_t>() << ','
+                << farther_conflict_dap.sum().item<int64_t>() << '\n';
 
-    // auto filtered_pkg = filter(points, colors, depths_in_rsp_frame, pixels);
-    auto filtered_pkg = filter(filtered_points, filtered_colors, filtered_depths_in_rsp_frame, filtered_pixels);
+        saveMapExtensionImages(rendered_depth, rendered_alpha, diagnosis_mask,
+                               dataset->diagnosis_dir_, frame_index);
+    }
     
     /// densification
     torch::Tensor fused_point_cloud = std::get<0>(filtered_pkg);  // (n, 3)
@@ -1385,6 +1567,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     dataset->pointcloud_.clear();
     dataset->pointcolor_.clear();
     dataset->pointdepth_.clear();
+    dataset->dap_seed_count_ = 0;
 }
 
 void decayOptList(int max_iters, const int train_camera_num, 

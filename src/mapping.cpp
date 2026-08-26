@@ -23,8 +23,11 @@
 #include <thread>
 #include <condition_variable>
 #include <chrono>
+#include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
+#include <cstdlib>
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -49,6 +52,12 @@ std::atomic<double> dap_wait_start(0.0);
 
 namespace
 {
+bool mapExtensionDiagnosisEnabled()
+{
+    const char* value = std::getenv("ODGS_MAP_EXTENSION_DIAG");
+    return value != nullptr && std::string(value) == "1";
+}
+
 void saveRgbTensor(const torch::Tensor& image, const std::string& path)
 {
     torch::Tensor image_cpu = image.detach().clamp(0, 1).to(torch::kCPU)
@@ -62,12 +71,86 @@ void saveRgbTensor(const torch::Tensor& image, const std::string& path)
         throw std::runtime_error("Failed to save online RGB image: " + path);
 }
 
+void saveCausalDepthDiagnosis(const torch::Tensor& rendered_depth,
+                              const torch::Tensor& rendered_final_transmittance,
+                              const torch::Tensor& valid_mask,
+                              const std::string& diagnosis_dir,
+                              const std::string& image_name)
+{
+    auto depth_cpu = rendered_depth.detach().squeeze().to(torch::kCPU).contiguous();
+    auto alpha_cpu = (1.0 - rendered_final_transmittance).detach().squeeze()
+                         .to(torch::kCPU).contiguous();
+    const int height = static_cast<int>(depth_cpu.size(0));
+    const int width = static_cast<int>(depth_cpu.size(1));
+    cv::Mat depth(height, width, CV_32FC1, depth_cpu.data_ptr<float>());
+    cv::Mat alpha(height, width, CV_32FC1, alpha_cpu.data_ptr<float>());
+    depth = depth.clone();
+    alpha = alpha.clone();
+    cv::patchNaNs(depth, 0.0);
+    cv::patchNaNs(alpha, 0.0);
+
+    cv::Mat valid_region(height, width, CV_8UC1, cv::Scalar(255));
+    if (valid_mask.defined())
+    {
+        auto mask_cpu = valid_mask.detach().to(torch::kCPU).to(torch::kUInt8).contiguous();
+        cv::Mat mask(height, width, CV_8UC1, mask_cpu.data_ptr<uint8_t>());
+        valid_region = mask.clone() * 255;
+    }
+
+    cv::Mat clipped_depth;
+    cv::max(depth, 0.0, clipped_depth);
+    cv::min(clipped_depth, 80.0, clipped_depth);
+    cv::Mat depth_u8;
+    clipped_depth.convertTo(depth_u8, CV_8UC1, 255.0 / 80.0);
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_u8, depth_color, cv::COLORMAP_TURBO);
+    depth_color.setTo(cv::Scalar(0, 0, 0), (depth <= 0.0f) | (valid_region == 0));
+
+    cv::Mat clipped_alpha;
+    cv::max(alpha, 0.0, clipped_alpha);
+    cv::min(clipped_alpha, 1.0, clipped_alpha);
+    cv::Mat alpha_u8;
+    clipped_alpha.convertTo(alpha_u8, CV_8UC1, 255.0);
+    alpha_u8.setTo(0, valid_region == 0);
+
+    cv::imwrite(diagnosis_dir + "/causal_depth/" + image_name, depth_color);
+    cv::imwrite(diagnosis_dir + "/causal_alpha/" + image_name, alpha_u8);
+}
+
+void appendOnlineDepthMetric(const std::shared_ptr<Camera>& camera,
+                             const torch::Tensor& rendered_depth,
+                             const torch::Tensor& valid_mask,
+                             const std::string& metrics_path)
+{
+    auto rendered_cpu = rendered_depth.detach().squeeze().to(torch::kCPU).contiguous();
+    auto lidar_depth = camera->diagnostic_depth_.detach().squeeze().to(torch::kCPU).contiguous();
+    auto lidar_valid = camera->lidar_valid_mask_.detach().squeeze().to(torch::kCPU).to(torch::kBool);
+    auto overlap = lidar_valid & torch::isfinite(lidar_depth) & (lidar_depth > 0.0) &
+                   torch::isfinite(rendered_cpu) & (rendered_cpu > 0.0);
+    if (valid_mask.defined())
+        overlap &= valid_mask.detach().squeeze().to(torch::kCPU).to(torch::kBool);
+
+    const int64_t overlap_pixels = overlap.sum().item<int64_t>();
+    const double depth_l1 = overlap_pixels > 0
+        ? torch::abs(rendered_cpu.masked_select(overlap) - lidar_depth.masked_select(overlap))
+              .mean().item<double>()
+        : std::numeric_limits<double>::quiet_NaN();
+
+    const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
+    std::ofstream metrics(metrics_path, std::ios::app);
+    if (write_header)
+        metrics << "image_name,lidar_overlap_pixels,lidar_mae_m\n";
+    metrics << camera->image_name_ << ',' << overlap_pixels << ',' << depth_l1 << '\n';
+}
+
 void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
                      const std::shared_ptr<Dataset>& dataset,
                      const std::shared_ptr<GaussianModel>& gaussians,
                      torch::Tensor& background,
                      const std::string& render_dir,
-                     const std::string& gt_dir)
+                     const std::string& gt_dir,
+                     const std::string& depth_metrics_path,
+                     const std::string& diagnosis_dir = "")
 {
     torch::NoGradGuard no_grad;
     const auto render_pkg = render(camera, gaussians, background,
@@ -79,6 +162,10 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
     auto ground_truth = compositeMaskedImage(camera->original_image_, valid_mask, background);
     saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
     saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
+    appendOnlineDepthMetric(camera, std::get<1>(render_pkg), valid_mask, depth_metrics_path);
+    if (!diagnosis_dir.empty())
+        saveCausalDepthDiagnosis(std::get<1>(render_pkg), std::get<2>(render_pkg),
+                                 valid_mask, diagnosis_dir, camera->image_name_);
 }
 }  // namespace
 
@@ -228,16 +315,30 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     Params prm(node);
     online_dap_enabled = prm.online_dap;
     std::cout << "        [SH Degree] " << prm.sh_degree << std::endl;
+    std::cout << "        [Map Extension Min Depth Gap] "
+              << prm.map_extension_min_depth_gap_m << " m" << std::endl;
     std::shared_ptr<GaussianModel> gaussians = std::make_shared<GaussianModel>(prm);
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
     dataset->setDiagnosisDirectory(result_path + "/depth_diagnose");
 
     const std::string online_render_dir = result_path + "/online_render";
     const std::string online_gt_dir = result_path + "/online_gt";
+    const std::string depth_diagnosis_dir = result_path + "/depth_diagnose";
+    const std::string online_depth_metrics_path =
+        depth_diagnosis_dir + "/online_render_depth_metrics.csv";
     if (fs::exists(online_render_dir)) fs::remove_all(online_render_dir);
     if (fs::exists(online_gt_dir)) fs::remove_all(online_gt_dir);
     fs::create_directories(online_render_dir);
     fs::create_directories(online_gt_dir);
+    fs::create_directories(depth_diagnosis_dir);
+    if (fs::exists(online_depth_metrics_path)) fs::remove(online_depth_metrics_path);
+    const bool extension_diagnosis = mapExtensionDiagnosisEnabled();
+    const std::string extension_diagnosis_dir = result_path + "/depth_diagnose";
+    if (extension_diagnosis)
+    {
+        fs::create_directories(extension_diagnosis_dir + "/causal_depth");
+        fs::create_directories(extension_diagnosis_dir + "/causal_alpha");
+    }
     torch::Tensor online_background = prm.white_background
         ? torch::ones({3}, torch::kFloat32).cuda()
         : torch::zeros({3}, torch::kFloat32).cuda();
@@ -279,7 +380,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             {
                 t_start = std::chrono::steady_clock::now();
                 saveOnlineFrame(current_camera, dataset, gaussians, online_background,
-                                online_render_dir, online_gt_dir);
+                                online_render_dir, online_gt_dir, online_depth_metrics_path);
                 torch::cuda::synchronize();
                 t_end = std::chrono::steady_clock::now();
                 total_online_render_time +=
@@ -319,7 +420,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
 
         t_start = std::chrono::steady_clock::now();
         saveOnlineFrame(current_camera, dataset, gaussians, online_background,
-                        online_render_dir, online_gt_dir);
+                        online_render_dir, online_gt_dir, online_depth_metrics_path,
+                        extension_diagnosis ? extension_diagnosis_dir : "");
         torch::cuda::synchronize();
         t_end = std::chrono::steady_clock::now();
         total_online_render_time +=

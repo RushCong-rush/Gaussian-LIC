@@ -527,13 +527,13 @@ renderCUDA(
 			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
-			if (!no_color) 
-			{
-				for (int ch = 0; ch < CHANNELS; ch++) 
-					C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+				if (!no_color)
+				{
+					for (int ch = 0; ch < CHANNELS; ch++)
+						C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+				}
 				depth_render += collected_depth[j] * alpha * T;
 				contributor_real++;
-			}
 
 			T = test_T;
 			last_contributor = contributor;
@@ -545,13 +545,13 @@ renderCUDA(
 	if (inside) 
 	{
 		out_final_T[pix_id] = T;
-		if (!no_color) 
-		{
-			n_contrib[pix_id] = last_contributor;
-			for (int ch = 0; ch < CHANNELS; ch++) 
-				out_color[ch * H * W + pix_id] = C[ch];
+			if (!no_color)
+			{
+				n_contrib[pix_id] = last_contributor;
+				for (int ch = 0; ch < CHANNELS; ch++)
+					out_color[ch * H * W + pix_id] = C[ch];
+			}
 			out_depth[pix_id] = contributor_real ? depth_render / (1 - T) : 0.f;
-		}
 	}
 	if (no_color) { return; }
 

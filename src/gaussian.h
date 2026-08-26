@@ -114,6 +114,7 @@ public:
     Eigen::aligned_vector<Eigen::Vector3d> pointcloud_;
     Eigen::aligned_vector<Eigen::Vector3d> pointcolor_;
     std::vector<float> pointdepth_;
+    size_t dap_seed_count_ = 0;
     
     std::vector<std::shared_ptr<Camera>> train_cameras_;
     std::vector<std::shared_ptr<Camera>> test_cameras_;
@@ -177,6 +178,7 @@ public:
     bool compute_cov3D_python_;
     double lambda_erank_;
     double scaling_scale_;
+    double map_extension_min_depth_gap_m_;
 
     double position_lr_;
     double feature_lr_;
