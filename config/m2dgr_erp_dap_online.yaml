@@ -1,0 +1,40 @@
+width: 1024
+height: 512
+fx: 162.97466
+fy: 162.97466
+cx: 512.0
+cy: 256.0
+camera_model: equirectangular
+metric_mask_path: /workspace/output/datasets/m2dgr/room_01_odgs_valid_mask.png
+
+select_every_k_frame: 5
+depth_completion: false
+online_dap: true
+dap_topic: /depth_dap_for_gs
+dap_dense_depth_supervision: false
+patch_size: 10
+max_depth: 120
+map_extension_min_depth_gap_m: 0.25
+
+sh_degree: 3
+white_background: false
+random_background: false
+convert_SHs_python: false
+compute_cov3D_python: false
+lambda_erank: 0
+scaling_scale: 2
+
+position_lr: 0.00016
+feature_lr: 0.005
+opacity_lr: 0.05
+scaling_lr: 0.015
+rotation_lr: 0.001
+lambda_dssim: 0.2
+optimize_depth: true
+lambda_depth: 0.005
+iteration_decay: true
+
+apply_exposure: false
+exposure_lr: 0.001
+skybox_points_num: 0
+skybox_radius: 1000
