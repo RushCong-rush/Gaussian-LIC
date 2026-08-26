@@ -7,7 +7,7 @@ cy: 256.0
 camera_model: equirectangular
 metric_mask_path: /datasets/hilti_oxford_2022/exp14_basement_2/panorama_coincident_aware/coverage_mask.png
 
-select_every_k_frame: 5
+select_every_k_frame: 3
 depth_completion: false
 online_dap: true
 dap_topic: /depth_dap_for_gs
