@@ -22,7 +22,6 @@
 #include <atomic>
 #include <thread>
 #include <condition_variable>
-#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
@@ -45,6 +44,8 @@ std::atomic<bool> exit_flag(false);
 std::atomic<double> last_point_time(0.0);
 std::atomic<bool> gaussians_initialized(false);
 std::atomic<bool> online_dap_enabled(false);
+std::atomic<bool> dap_sync_error(false);
+std::atomic<double> dap_wait_start(0.0);
 
 namespace
 {
@@ -117,7 +118,7 @@ void dapDepthCallback(const sensor_msgs::ImageConstPtr& depth_msg)
     m_buf.unlock();
 }
 
-bool getAlignedData(Frame& cur_frame)
+bool getAlignedData(Frame& cur_frame, bool require_dap)
 {
     if (point_buf.empty() || pose_buf.empty() || image_buf.empty() || depth_buf.empty())
     {
@@ -177,26 +178,27 @@ bool getAlignedData(Frame& cur_frame)
         return false;
     }
 
-    // The DAP image is produced asynchronously. It is required only for the
-    // online ERP path; the perspective and offline-depth paths keep the
-    // original four-stream alignment.
-    if (online_dap_enabled)
+    // Non-keyframes do not consume DAP depth. Keyframes require the prediction
+    // copied from their exact ERP timestamp; a mismatch is a protocol error.
+    if (require_dap)
     {
-        if (dap_depth_buf.empty()) return false;
-        while (1)
+        if (dap_depth_buf.empty())
         {
-            if (dap_depth_buf.front()->header.stamp.toSec() < frame_time - 0.01)
-            {
-                dap_depth_buf.pop();
-                if (dap_depth_buf.empty()) return false;
-            }
-            else break;
-        }
-        if (dap_depth_buf.front()->header.stamp.toSec() > frame_time + 0.01)
-        {
-            point_buf.pop();
+            double expected = 0.0;
+            dap_wait_start.compare_exchange_strong(expected, ros::WallTime::now().toSec());
             return false;
         }
+        const uint64_t image_stamp = image_buf.front()->header.stamp.toNSec();
+        const uint64_t dap_stamp = dap_depth_buf.front()->header.stamp.toNSec();
+        if (dap_stamp != image_stamp)
+        {
+            ROS_FATAL_STREAM("Keyframe DAP timestamp mismatch: ERP=" << image_stamp
+                             << ", DAP=" << dap_stamp);
+            dap_sync_error = true;
+            exit_flag = true;
+            return false;
+        }
+        dap_wait_start = 0.0;
     }
 
     auto cur_point = point_buf.front();
@@ -208,13 +210,13 @@ bool getAlignedData(Frame& cur_frame)
     cur_frame.pose_msg = cur_pose;
     cur_frame.image_msg = cur_image;
     cur_frame.depth_msg = cur_depth;
-    cur_frame.dap_depth_msg = online_dap_enabled ? dap_depth_buf.front() : sensor_msgs::ImageConstPtr();
+    cur_frame.dap_depth_msg = require_dap ? dap_depth_buf.front() : sensor_msgs::ImageConstPtr();
 
     point_buf.pop();
     pose_buf.pop();
     image_buf.pop();
     depth_buf.pop();
-    if (online_dap_enabled) dap_depth_buf.pop();
+    if (require_dap) dap_depth_buf.pop();
 
     return true;
 }
@@ -252,7 +254,9 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     {
         /// [1] data alignment
         m_buf.lock();
-        bool align_flag = getAlignedData(cur_frame);
+        const bool require_dap = online_dap_enabled &&
+            ((dataset->all_frame_num_ + 1) % prm.select_every_k_frame == 0);
+        bool align_flag = getAlignedData(cur_frame, require_dap);
         m_buf.unlock();
         if (!align_flag) continue;
         
@@ -323,6 +327,12 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         ++online_rendered_frames;
     }
 
+    if (dap_sync_error)
+    {
+        ros::shutdown();
+        return;
+    }
+
     /// [6] evaluation
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
@@ -360,6 +370,12 @@ int main(int argc, char** argv)
     nh.param<std::string>("config_path", config_path, "");
     YAML::Node config_node = YAML::LoadFile(config_path);
     online_dap_enabled = config_node["online_dap"] ? config_node["online_dap"].as<bool>() : false;
+    const int keyframe_interval = config_node["select_every_k_frame"].as<int>();
+    if (keyframe_interval <= 0)
+    {
+        ROS_FATAL_STREAM("select_every_k_frame must be positive, got " << keyframe_interval);
+        return 2;
+    }
     std::string dap_topic = config_node["dap_topic"] ? config_node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
     if (online_dap_enabled)
         dap_depth_sub = it_.subscribe(dap_topic, 100, dapDepthCallback);
@@ -386,8 +402,18 @@ int main(int argc, char** argv)
             if (gaussians_initialized && (now - last_point_time > 5.0)) 
             {
                 m_buf.lock();
-                if (point_buf.empty() || (online_dap_enabled && dap_depth_buf.empty()))
+                if (point_buf.empty())
                     exit_flag = true;
+                else
+                {
+                    const double wait_start = dap_wait_start.load();
+                    if (online_dap_enabled && wait_start > 0.0 && now - wait_start > 5.0)
+                    {
+                        ROS_FATAL("Timed out waiting for exact-timestamp DAP depth for a keyframe");
+                        dap_sync_error = true;
+                        exit_flag = true;
+                    }
+                }
                 m_buf.unlock();
             } 
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -399,5 +425,5 @@ int main(int argc, char** argv)
     mapping_process.join();
     monitor_thread.join();
     
-    return 0;
+    return dap_sync_error ? 2 : 0;
 }
