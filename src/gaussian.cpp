@@ -51,7 +51,7 @@ bool mapExtensionDiagnosisEnabled()
 bool depthAwareMapExtensionEnabled()
 {
     const char* value = std::getenv("ODGS_DEPTH_AWARE_EXTENSION");
-    return value != nullptr && std::string(value) == "1";
+    return value == nullptr || std::string(value) == "1";
 }
 
 double tensorMeanOrNaN(const torch::Tensor& values)
