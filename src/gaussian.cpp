@@ -730,6 +730,7 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_dssim_ = prm.lambda_dssim;
     optimize_depth_ = prm.optimize_depth;
     lambda_depth_ = prm.lambda_depth;
+    std::cout << "        [Depth Loss Weight] " << lambda_depth_ << std::endl;
     iteration_decay_ = prm.iteration_decay;
 
     apply_exposure_ = prm.apply_exposure;

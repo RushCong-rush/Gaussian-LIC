@@ -35,7 +35,7 @@ scaling_lr: 0.015
 rotation_lr: 0.001
 lambda_dssim: 0.2
 optimize_depth: true
-lambda_depth: 0.005
+lambda_depth: 0.01
 iteration_decay: true
 
 apply_exposure: false
