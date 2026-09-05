@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <vector>
 
 #include <torch/torch.h>
@@ -37,6 +38,19 @@ inline torch::Tensor masked_l1_loss(
 {
     auto valid = mask.unsqueeze(0).expand_as(network_output);
     return torch::abs(network_output - gt).masked_select(valid).mean();
+}
+
+inline torch::Tensor source_balanced_depth_l1(
+    const torch::Tensor& rendered, const torch::Tensor& target,
+    const torch::Tensor& valid, const torch::Tensor& lidar_valid,
+    double dap_relative_weight)
+{
+    auto error = torch::abs(rendered - target);
+    auto lidar_error = error.masked_select(valid & lidar_valid);
+    auto dap_error = error.masked_select(valid & ~lidar_valid);
+    // Normalize each source independently; an empty group contributes zero.
+    return lidar_error.sum() / std::max<int64_t>(lidar_error.numel(), 1)
+        + dap_relative_weight * dap_error.sum() / std::max<int64_t>(dap_error.numel(), 1);
 }
 
 inline torch::Tensor psnr(torch::Tensor &img1, torch::Tensor &img2)

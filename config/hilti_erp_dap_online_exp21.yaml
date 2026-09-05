@@ -14,6 +14,7 @@ dap_topic: /depth_dap_for_gs
 # Match the original SPNet path: completed depth seeds Gaussians, while
 # measured LiDAR alone supervises geometry during optimization.
 dap_dense_depth_supervision: false
+dap_depth_loss_relative_weight: 0.1
 patch_size: 10
 max_depth: 80
 min_point_depth: 0.0

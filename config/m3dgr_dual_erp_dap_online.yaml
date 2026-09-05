@@ -11,6 +11,7 @@ depth_completion: false
 online_dap: true
 dap_topic: /depth_dap_for_gs
 dap_dense_depth_supervision: false
+dap_depth_loss_relative_weight: 0.1
 patch_size: 10
 min_point_depth: 0.0
 max_depth: 120

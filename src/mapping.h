@@ -21,6 +21,7 @@
 #include "yaml_utils.h"
 
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <queue>
 #include <iostream>
@@ -85,6 +86,10 @@ public:
         dap_topic = node["dap_topic"] ? node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
         dap_dense_depth_supervision = node["dap_dense_depth_supervision"]
             ? node["dap_dense_depth_supervision"].as<bool>() : true;
+        dap_depth_loss_relative_weight = node["dap_depth_loss_relative_weight"]
+            ? node["dap_depth_loss_relative_weight"].as<double>() : 0.1;
+        if (!std::isfinite(dap_depth_loss_relative_weight) || dap_depth_loss_relative_weight < 0.0)
+            throw std::invalid_argument("dap_depth_loss_relative_weight must be finite and nonnegative");
         dap_initialize_gaussians = node["dap_initialize_gaussians"]
             ? node["dap_initialize_gaussians"].as<bool>() : true;
         dap_seed_lidar_dilation_pixels = node["dap_seed_lidar_dilation_pixels"]
@@ -139,6 +144,7 @@ public:
     bool online_dap;
     std::string dap_topic;
     bool dap_dense_depth_supervision;
+    double dap_depth_loss_relative_weight;
     bool dap_initialize_gaussians;
     int dap_seed_lidar_dilation_pixels;
     std::string engine_path;

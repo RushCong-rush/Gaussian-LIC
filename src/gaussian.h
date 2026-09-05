@@ -191,6 +191,8 @@ public:
     double lambda_dssim_;
     bool optimize_depth_;
     double lambda_depth_;
+    bool source_balanced_depth_supervision_;
+    double dap_depth_loss_relative_weight_;
     bool iteration_decay_;
 
     bool apply_exposure_;

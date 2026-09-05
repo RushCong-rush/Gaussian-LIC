@@ -108,3 +108,10 @@ target_link_libraries(erp_rasterizer_forward_test
                       ${Python3_LIBRARIES}
                       ${FFI_LIB}
                       ${CUDA_LIB_DIR}/libcudart.so)
+
+add_executable(depth_supervision_test
+               ${PROJECT_SOURCE_DIR}/tests/test_depth_supervision.cpp)
+target_link_libraries(depth_supervision_test
+                      ${TORCH_LIBRARIES}
+                      ${Python3_LIBRARIES}
+                      ${FFI_LIB})

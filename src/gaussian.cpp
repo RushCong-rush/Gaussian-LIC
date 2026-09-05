@@ -730,6 +730,13 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_dssim_ = prm.lambda_dssim;
     optimize_depth_ = prm.optimize_depth;
     lambda_depth_ = prm.lambda_depth;
+    source_balanced_depth_supervision_ = prm.online_dap && prm.dap_dense_depth_supervision;
+    dap_depth_loss_relative_weight_ = prm.dap_depth_loss_relative_weight;
+    std::cout << "        [Source Balanced Depth Supervision] "
+              << (optimize_depth_ && source_balanced_depth_supervision_) << std::endl;
+    std::cout << "        [Depth Loss Weight] " << lambda_depth_ << std::endl;
+    std::cout << "        [DAP Depth Loss Relative Weight] "
+              << dap_depth_loss_relative_weight_ << std::endl;
     iteration_decay_ = prm.iteration_decay;
 
     apply_exposure_ = prm.apply_exposure;
@@ -1661,8 +1668,6 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto Ll1 = use_image_valid_mask
             ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
             : loss_utils::l1_loss(rendered_image, gt_image);
-        auto Ll1_depth = torch::abs(
-            rendered_depth.masked_select(depth_mask) - gt_depth.masked_select(depth_mask)).mean();
         float lambda_dssim = pc->lambda_dssim_;
         float lambda_depth = pc->lambda_depth_;
         torch::Tensor ssim_value;
@@ -1679,7 +1684,17 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
                 rendered_image_unsq, gt_image_unsq, image_valid_mask)
             : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
-        if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
+        if (pc->optimize_depth_)
+        {
+            auto Ll1_depth = pc->source_balanced_depth_supervision_
+                ? loss_utils::source_balanced_depth_l1(
+                    rendered_depth, gt_depth, depth_mask,
+                    viewpoint_cam->lidar_valid_mask_.to(torch::kCUDA).gt(0),
+                    pc->dap_depth_loss_relative_weight_)
+                : torch::abs(rendered_depth.masked_select(depth_mask)
+                    - gt_depth.masked_select(depth_mask)).mean();
+            loss += lambda_depth * Ll1_depth;
+        }
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_forward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
