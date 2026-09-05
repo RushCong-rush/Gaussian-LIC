@@ -12,6 +12,7 @@ depth_completion: false
 patch_size: 10
 max_depth: 120
 map_extension_min_depth_gap_m: 0.25
+map_extension_relative_depth_gap: 0.1
 
 sh_degree: 3
 white_background: false

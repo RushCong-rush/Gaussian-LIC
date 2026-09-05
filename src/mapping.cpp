@@ -317,6 +317,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << "        [SH Degree] " << prm.sh_degree << std::endl;
     std::cout << "        [Map Extension Min Depth Gap] "
               << prm.map_extension_min_depth_gap_m << " m" << std::endl;
+    std::cout << "        [Map Extension Relative Depth Gap] "
+              << prm.map_extension_relative_depth_gap << std::endl;
     std::shared_ptr<GaussianModel> gaussians = std::make_shared<GaussianModel>(prm);
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
     dataset->setDiagnosisDirectory(result_path + "/depth_diagnose");

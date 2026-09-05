@@ -26,6 +26,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <chrono>
+#include <random>
 
 #include <torch/torch.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -172,6 +173,7 @@ public:
 
 public:
     int sh_degree_;
+    std::mt19937 random_generator_;
     bool white_background_;
     bool random_background_;
     bool convert_SHs_python_;
@@ -179,6 +181,7 @@ public:
     double lambda_erank_;
     double scaling_scale_;
     double map_extension_min_depth_gap_m_;
+    double map_extension_relative_depth_gap_;
 
     double position_lr_;
     double feature_lr_;

@@ -18,6 +18,7 @@ patch_size: 10
 max_depth: 80
 min_point_depth: 0.0
 map_extension_min_depth_gap_m: 0.25
+map_extension_relative_depth_gap: 0.1
 sh_degree: 3
 # Render uncovered ERP pixels with this background after excluding them from training.
 white_background: true

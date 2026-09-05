@@ -698,6 +698,20 @@ void Dataset::addFrame(Frame& cur_frame)
 
 GaussianModel::GaussianModel(const Params& prm)
 {
+    const char* deterministic = std::getenv("DETERMINISTIC_EXPERIMENT");
+    if (deterministic != nullptr && std::string(deterministic) == "1")
+    {
+        const char* configured_seed = std::getenv("EXPERIMENT_RANDOM_SEED");
+        const uint64_t seed = configured_seed != nullptr ? std::stoull(configured_seed) : 0;
+        random_generator_.seed(seed);
+        torch::manual_seed(seed);
+        std::cout << "        [GS Random Seed] " << seed << std::endl;
+    }
+    else
+    {
+        random_generator_.seed(std::random_device{}());
+        std::cout << "        [GS Random Seed] random" << std::endl;
+    }
     sh_degree_ = prm.sh_degree;
     white_background_ = prm.white_background;
     random_background_ = prm.random_background;
@@ -706,6 +720,7 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_erank_ = prm.lambda_erank;
     scaling_scale_ = prm.scaling_scale;
     map_extension_min_depth_gap_m_ = prm.map_extension_min_depth_gap_m;
+    map_extension_relative_depth_gap_ = prm.map_extension_relative_depth_gap;
 
     position_lr_ = prm.position_lr;
     feature_lr_ = prm.feature_lr;
@@ -1439,7 +1454,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                                       (candidate_rendered_depth > 0.0);
     auto closer_depth_threshold = torch::maximum(
         torch::full_like(filtered_projected_depths, pc->map_extension_min_depth_gap_m_),
-        0.1 * filtered_projected_depths);
+        pc->map_extension_relative_depth_gap_ * filtered_projected_depths);
     auto closer_depth_conflict = rendered_depth_valid &
         (filtered_projected_depths + closer_depth_threshold < candidate_rendered_depth);
     auto depth_rescued = geometrically_valid & (~alpha_open) & closer_depth_conflict;
@@ -1571,7 +1586,8 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
 }
 
 void decayOptList(int max_iters, const int train_camera_num, 
-                  const std::shared_ptr<Dataset>& dataset, const std::vector<int>& all_list, std::vector<int>& opt_list)
+                  const std::shared_ptr<Dataset>& dataset, const std::vector<int>& all_list,
+                  std::vector<int>& opt_list, std::mt19937& gen)
 {
     Eigen::Vector3d t0 = dataset->t_wc_[0];
     double dist = (dataset->t_wc_.back() - t0).norm();
@@ -1579,8 +1595,6 @@ void decayOptList(int max_iters, const int train_camera_num,
     {
         max_iters /= 2;
         opt_list.clear();
-        std::random_device rd;
-        std::mt19937 gen(rd());
         int split = train_camera_num * 2 / 3;
         int half = max_iters / 2;
         std::sample(all_list.begin(), all_list.begin() + split,
@@ -1601,8 +1615,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     std::vector<int> all_list(train_camera_num);
     std::iota(all_list.begin(), all_list.end(), 0);
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    auto& gen = pc->random_generator_;
     if (train_camera_num <= max_iters) 
     {
         opt_list = all_list;
@@ -1612,7 +1625,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         std::sample(all_list.begin(), all_list.end(), 
                     std::back_inserter(opt_list), max_iters, gen);
     } 
-    if (pc->iteration_decay_) decayOptList(max_iters, train_camera_num, dataset, all_list, opt_list);
+    if (pc->iteration_decay_) decayOptList(max_iters, train_camera_num, dataset, all_list, opt_list, gen);
     std::shuffle(opt_list.begin(), opt_list.end(), gen);
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();

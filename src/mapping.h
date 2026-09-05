@@ -77,6 +77,10 @@ public:
             ? node["map_extension_min_depth_gap_m"].as<double>() : 0.5;
         if (map_extension_min_depth_gap_m <= 0.0)
             throw std::invalid_argument("map_extension_min_depth_gap_m must be positive");
+        map_extension_relative_depth_gap = node["map_extension_relative_depth_gap"]
+            ? node["map_extension_relative_depth_gap"].as<double>() : 0.1;
+        if (map_extension_relative_depth_gap < 0.0)
+            throw std::invalid_argument("map_extension_relative_depth_gap must be nonnegative");
         online_dap = node["online_dap"] ? node["online_dap"].as<bool>() : false;
         dap_topic = node["dap_topic"] ? node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
         dap_dense_depth_supervision = node["dap_dense_depth_supervision"]
@@ -131,6 +135,7 @@ public:
     double min_point_depth;
     double max_depth;
     double map_extension_min_depth_gap_m;
+    double map_extension_relative_depth_gap;
     bool online_dap;
     std::string dap_topic;
     bool dap_dense_depth_supervision;
