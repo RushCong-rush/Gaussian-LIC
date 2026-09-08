@@ -364,7 +364,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             ((dataset->all_frame_num_ + 1) % prm.select_every_k_frame == 0);
         bool align_flag = getAlignedData(cur_frame, require_dap);
         m_buf.unlock();
-        if (!align_flag) continue;
+        if (!align_flag)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         
         /// [2] add every frame
         t_start = std::chrono::steady_clock::now();
