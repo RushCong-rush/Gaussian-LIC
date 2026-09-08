@@ -57,7 +57,11 @@ __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& r
 
 __forceinline__ __device__ float periodicPixelDifference(float difference, int width)
 {
-	return difference - nearbyintf(difference / static_cast<float>(width)) * width;
+	// Both ERP coordinates are in [0, width], so at most one wrap is needed.
+	const float half_width = 0.5f * width;
+	if (difference > half_width) return difference - width;
+	if (difference < -half_width) return difference + width;
+	return difference;
 }
 
 __forceinline__ __device__ int getErpRects(
