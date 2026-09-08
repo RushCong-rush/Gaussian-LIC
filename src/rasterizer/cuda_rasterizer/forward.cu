@@ -365,11 +365,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
 		float2 culling_point = point_image;
 		tile_count = computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min, rect_max);
-		if (rect_count == 2)
-		{
-			culling_point.x += point_image.x - my_radius < 0.0f ? W : -W;
-			tile_count += computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min_1, rect_max_1);
-		}
+		// The cooperative counter needs every lane, including non-seam Gaussians.
+		culling_point.x += point_image.x - my_radius < 0.0f ? W : -W;
+		tile_count += computeTilebasedCullingTileCount(active && rect_count == 2, co, culling_point, opacity_factor_threshold, rect_min_1, rect_max_1);
 	}
 	else
 	{

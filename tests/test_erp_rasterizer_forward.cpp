@@ -285,6 +285,31 @@ void checkErpGradients()
 }
 }
 
+void checkMixedSeamTileCounts()
+{
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto means = torch::tensor({{0.1f, 0.5f, -5.0f}, {0.0f, 0.2f, 5.0f}}, options);
+    auto tileCount = [&](const torch::Tensor& points)
+    {
+        const auto n = points.size(0);
+        auto empty = torch::empty({0}, options);
+        auto rotations = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}, options).repeat({n, 1});
+        auto result = RasterizeGaussiansCUDA(
+            torch::zeros({3}, options), points.contiguous(), empty,
+            torch::full({n, 1}, 0.8f, options), torch::full({n, 3}, 1.5f, options),
+            rotations, 1.0f, empty, torch::eye(4, options), torch::eye(4, options),
+            1.0f, 1.0f, 512, 1024, -1.0f, 1.0f, -1.0f, 1.0f,
+            torch::zeros({n, 1, 3}, options), empty, 0, torch::zeros({3}, options),
+            false, true, true, true);
+        return std::get<0>(result);
+    };
+    // Tile counts must be additive even when only some lanes cross the seam.
+    const int expected = tileCount(means.narrow(0, 0, 1)) + tileCount(means.narrow(0, 1, 1));
+    require(expected > 64, "mixed-seam fixture must exercise cooperative tile counting");
+    require(tileCount(means) == expected, "mixed-seam warp lost Gaussian-tile pairs");
+    require(tileCount(means.flip({0})) == expected, "tile count depends on Gaussian ordering");
+}
+
 int main(int argc, char** argv)
 {
     torch::NoGradGuard no_grad;
@@ -343,6 +368,7 @@ int main(int argc, char** argv)
             "pinhole z-depth regressed");
 
     checkErpGradients();
+    checkMixedSeamTileCounts();
 
     if (argc == 2)
     {
