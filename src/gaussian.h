@@ -45,6 +45,8 @@
 #include "rasterizer/renderer.h"
 
 #include "depth_completer.h"
+#include "lidar_angular_band.h"
+#include "diagnostic_output.h"
 
 const double C0 = 0.28209479177387814;
 inline double RGB2SH(double color) {return (color - 0.5) / C0;}
@@ -64,6 +66,21 @@ public:
         patch_size_(prm.patch_size), min_point_depth_(prm.min_point_depth), max_depth_(prm.max_depth),
         all_frame_num_(0), is_keyframe_current_(false)
     {
+        if (prm.mapping_lidar_fov)
+        {
+            if (!equirectangular_)
+                throw std::invalid_argument("mapping_lidar_fov requires ERP input");
+            const auto& node = prm.mapping_lidar_fov;
+            auto vector3 = [&](const char* key) {
+                const auto values = node[key].as<std::vector<double>>();
+                if (values.size() != 3) throw std::invalid_argument(key);
+                return Eigen::Vector3d(values[0], values[1], values[2]);
+            };
+            lidar_band_ = LidarAngularBand(node["keep_fraction"].as<double>(),
+                node["lower_deg"].as<double>(), node["upper_deg"].as<double>(),
+                vector3("axis_in_camera"), vector3("origin_in_camera"));
+            lidar_band_enabled_ = true;
+        }
         if (!prm.metric_mask_path.empty())
         {
             cv::Mat mask = cv::imread(prm.metric_mask_path, cv::IMREAD_GRAYSCALE);
@@ -89,6 +106,8 @@ public:
     double cx_;
     double cy_;
     bool equirectangular_;
+    bool lidar_band_enabled_ = false;
+    LidarAngularBand lidar_band_;
 
     int select_every_k_frame_;
     bool depth_completion_;

@@ -163,7 +163,7 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
     saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
     saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
     appendOnlineDepthMetric(camera, std::get<1>(render_pkg), valid_mask, depth_metrics_path);
-    if (!diagnosis_dir.empty())
+    if (!diagnosis_dir.empty() && saveDiagnosticImages(camera->frame_index_))
         saveCausalDepthDiagnosis(std::get<1>(render_pkg), std::get<2>(render_pkg),
                                  valid_mask, diagnosis_dir, camera->image_name_);
 }
@@ -325,6 +325,9 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
 
     const std::string online_render_dir = result_path + "/online_render";
     const std::string online_gt_dir = result_path + "/online_gt";
+    const std::string nonkeyframe_cache_dir = result_path + "/.nonkeyframe_cache";
+    fs::create_directories(nonkeyframe_cache_dir);
+    double total_nonkeyframe_cache_write_time = 0.0;
     const std::string depth_diagnosis_dir = result_path + "/depth_diagnose";
     const std::string online_depth_metrics_path =
         depth_diagnosis_dir + "/online_render_depth_metrics.csv";
@@ -389,6 +392,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                     std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
                 ++online_rendered_frames;
             }
+            const auto cache_start = std::chrono::steady_clock::now();
+            current_camera->offloadObservations(
+                nonkeyframe_cache_dir + "/" + current_camera->image_name_ + ".pt");
+            total_nonkeyframe_cache_write_time += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - cache_start).count();
             continue;
         }
 
@@ -448,6 +456,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << std::fixed << std::setprecision(2) << "        [Total Extending Time] " << total_extending_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Online Render Time] " << total_online_render_time << "s" << std::endl;
     std::cout << "        [Online Rendered Frames] " << online_rendered_frames << std::endl;
+    std::cout << "        [Total Nonkeyframe Cache Write Time] " << total_nonkeyframe_cache_write_time << "s" << std::endl;
     torch::NoGradGuard no_grad;
     evaluateVisualQuality(dataset, gaussians, result_path, lpips_path);
     gaussians->saveMap(result_path);

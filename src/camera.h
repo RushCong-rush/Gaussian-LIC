@@ -35,6 +35,33 @@ class Camera
 public:
     Camera(){}
 
+    void releaseObservations()
+    {
+        original_image_ = torch::Tensor();
+        original_depth_ = torch::Tensor();
+        diagnostic_depth_ = torch::Tensor();
+        lidar_valid_mask_ = torch::Tensor();
+    }
+
+    void offloadObservations(const std::string& path)
+    {
+        // Preserve float depth/RGB and the mask exactly, without image quantization.
+        torch::save(std::vector<torch::Tensor>{original_image_, original_depth_,
+                    diagnostic_depth_, lidar_valid_mask_}, path);
+        observation_cache_path_ = path;
+        releaseObservations();
+    }
+
+    void reloadObservations()
+    {
+        std::vector<torch::Tensor> observations;
+        torch::load(observations, observation_cache_path_);
+        original_image_ = observations.at(0);
+        original_depth_ = observations.at(1);
+        diagnostic_depth_ = observations.at(2);
+        lidar_valid_mask_ = observations.at(3);
+    }
+
     void setCameraModel(bool equirectangular)
     {
         is_equirectangular_ = equirectangular;
@@ -116,6 +143,9 @@ public:
 
 public:
     std::string image_name_;
+    std::string observation_cache_path_;
+    int frame_index_ = -1;
+    std::string full_lidar_reference_path_;
 
     int image_width_;              
     int image_height_;

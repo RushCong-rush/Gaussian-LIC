@@ -261,6 +261,36 @@ void Dataset::addFrame(Frame& cur_frame)
         lidar_depth_pixels_filtered_mask = cv::countNonZero(filtered);
         lidar_depth.setTo(0.0f, metric_mask_cv_ == 0);
     }
+    std::string full_lidar_reference_path;
+    const int full_lidar_pixels = cv::countNonZero(lidar_depth > 0.0f);
+    if (lidar_band_enabled_)
+    {
+        if (diagnosis_dir_.empty())
+            throw std::runtime_error("LiDAR FOV experiment requires a diagnosis directory");
+        if (is_keyframe)
+        {
+            const std::string reference_dir = diagnosis_dir_ + "/full_lidar_reference";
+            fs::create_directories(reference_dir);
+            full_lidar_reference_path = reference_dir + "/" +
+                std::to_string(cur_frame.image_msg->header.stamp.toNSec()) + ".exr";
+            cv::imwrite(full_lidar_reference_path, lidar_depth);
+        }
+        if (lidar_band_.fraction < 1.0)
+            for (int y = 0; y < lidar_depth.rows; ++y)
+            {
+                const double latitude = (0.5 - double(y) / lidar_depth.rows) * M_PI;
+                float* row = lidar_depth.ptr<float>(y);
+                for (int x = 0; x < lidar_depth.cols; ++x)
+                {
+                    if (!(row[x] > 0.0f)) continue;
+                    const double longitude = (2.0 * x / lidar_depth.cols - 1.0) * M_PI;
+                    const Eigen::Vector3d ray(std::cos(latitude) * std::sin(longitude),
+                        -std::sin(latitude), std::cos(latitude) * std::cos(longitude));
+                    if (!lidar_band_.contains(row[x] * ray)) row[x] = 0.0f;
+                }
+            }
+    }
+    const int retained_lidar_pixels = cv::countNonZero(lidar_depth > 0.0f);
     cv::Mat depth_map = lidar_depth.clone();
     if (cur_frame.dap_depth_msg)
     {
@@ -352,7 +382,7 @@ void Dataset::addFrame(Frame& cur_frame)
                       << "[DepthFusion] DAP scale " << dap_scale
                       << ", LiDAR anchors " << scale_ratios.size() << std::endl;
 
-        if (!diagnosis_dir_.empty() && equirectangular_ && (all_frame_num_ % (select_every_k_frame_ * 5) == 0))
+        if (!diagnosis_dir_.empty() && equirectangular_ && saveDiagnosticImages(frame_index))
         {
             fs::create_directories(diagnosis_dir_);
             auto colorize = [](const cv::Mat& depth, double max_depth) {
@@ -375,12 +405,20 @@ void Dataset::addFrame(Frame& cur_frame)
     // existing fused_*.png files are colorized diagnostics and are not metric.
     if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
         export_depth != nullptr && std::string(export_depth) == "1" &&
-        !diagnosis_dir_.empty())
+        !diagnosis_dir_.empty() && saveDiagnosticImages(frame_index))
     {
         const std::string depth_dir = diagnosis_dir_ + "/depth_float";
         fs::create_directories(depth_dir);
         const std::string stamp = std::to_string(cur_frame.image_msg->header.stamp.toNSec());
         cv::imwrite(depth_dir + "/" + stamp + ".exr", depth_map);
+        if (is_keyframe)
+        {
+            const std::string support_dir = diagnosis_dir_ + "/lidar_support";
+            fs::create_directories(support_dir);
+            cv::Mat support = (lidar_depth > 0.0f) &
+                              (lidar_depth < std::numeric_limits<float>::infinity());
+            cv::imwrite(support_dir + "/" + stamp + ".png", support);
+        }
     }
 
     /// pose
@@ -449,6 +487,7 @@ void Dataset::addFrame(Frame& cur_frame)
     size_t lidar_points_filtered_near = 0;
     size_t lidar_points_filtered_mask = 0;
     size_t lidar_points_kept = 0;
+    size_t lidar_points_filtered_fov = 0;
     const Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
     const Eigen::Vector3d t_cw = -R_cw * t_wc;
     for (const auto& pt : cloud->points)
@@ -501,12 +540,31 @@ void Dataset::addFrame(Frame& cur_frame)
             add_color(u1, v1, du * dv);
             point_color = weighted_color / valid_weight;
         }
+        if (lidar_band_enabled_ && !lidar_band_.contains(pt_c))
+        {
+            ++lidar_points_filtered_fov;
+            continue;
+        }
         pointcloud_.emplace_back(pt_w);
         pointcolor_.emplace_back(point_color);
         ++lidar_points_kept;
         if (!equirectangular_)
             assert(pt_c(2) > 0);
         pointdepth_.push_back(static_cast<float>(point_depth));
+    }
+
+    if (lidar_band_enabled_)
+    {
+        const std::string path = diagnosis_dir_ + "/lidar_fov_metrics.csv";
+        const bool header = !fs::exists(path);
+        std::ofstream stream(path, std::ios::app);
+        if (header)
+            stream << "frame_index,timestamp_ns,is_keyframe,keep_fraction,full_depth_pixels,"
+                      "retained_depth_pixels,eligible_seed_points,retained_seed_points\n";
+        stream << frame_index << ',' << cur_frame.image_msg->header.stamp.toNSec() << ','
+               << is_keyframe << ',' << lidar_band_.fraction << ',' << full_lidar_pixels << ','
+               << retained_lidar_pixels << ',' << lidar_points_kept + lidar_points_filtered_fov
+               << ',' << lidar_points_kept << '\n';
     }
 
     if (use_erp_valid_mask && !diagnosis_dir_.empty())
@@ -662,6 +720,8 @@ void Dataset::addFrame(Frame& cur_frame)
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
         std::string formatted_str = ss.str();
         cam->image_name_ = "train_" + formatted_str + ".jpg";
+        cam->frame_index_ = frame_index;
+        cam->full_lidar_reference_path_ = full_lidar_reference_path;
 
         cam->setCameraModel(equirectangular_);
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
@@ -685,6 +745,7 @@ void Dataset::addFrame(Frame& cur_frame)
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
         std::string formatted_str = ss.str();
         cam->image_name_ = "test_" + formatted_str + ".jpg";
+        cam->frame_index_ = frame_index;
 
         cam->setCameraModel(equirectangular_);
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
@@ -1118,6 +1179,34 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     const int width = static_cast<int>(fused_cpu.size(1));
     cv::Mat fused(height, width, CV_32FC1, fused_cpu.data_ptr<float>());
     cv::Mat rendered(height, width, CV_32FC1, rendered_cpu.data_ptr<float>());
+    if (!camera->full_lidar_reference_path_.empty())
+    {
+        const cv::Mat reference = cv::imread(camera->full_lidar_reference_path_, cv::IMREAD_UNCHANGED);
+        if (reference.type() != CV_32FC1 || reference.size() != rendered.size())
+            throw std::runtime_error("Invalid full LiDAR evaluation reference");
+        size_t count = 0, rendered_count = 0;
+        double sum = 0.0, squared = 0.0;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+            {
+                const float gt = reference.at<float>(y, x);
+                if (!(gt > 0.0f) || !std::isfinite(gt)) continue;
+                const float prediction = rendered.at<float>(y, x);
+                if (!std::isfinite(prediction) || prediction < 0.0f)
+                    throw std::runtime_error("Invalid rendered depth at full LiDAR reference");
+                const double error = std::abs(double(prediction) - gt);
+                sum += error;
+                squared += error * error;
+                ++count;
+                rendered_count += prediction > 0.0f;
+            }
+        const std::string path = diagnosis_dir + "/full_lidar_reference_metrics.csv";
+        const bool header = !fs::exists(path);
+        std::ofstream stream(path, std::ios::app);
+        if (header) stream << "image_name,split,reference_pixels,rendered_pixels,mae_m,rmse_m\n";
+        stream << camera->image_name_ << ',' << split << ',' << count << ',' << rendered_count
+               << ',' << sum / count << ',' << std::sqrt(squared / count) << '\n';
+    }
     auto lidar_mask_cpu = camera->lidar_valid_mask_.detach().to(torch::kCPU).contiguous();
     cv::Mat lidar_mask(height, width, CV_8UC1, lidar_mask_cpu.data_ptr<uint8_t>());
     cv::Mat valid_region;
@@ -1183,20 +1272,23 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
         return colored;
     };
 
-    cv::Mat fused_valid, rendered_valid;
-    cv::Mat fused_valid_mask = (fused > 0.0f) & valid_region;
-    cv::Mat rendered_valid_mask = (rendered > 0.0f) & valid_region;
-    fused.copyTo(fused_valid, fused_valid_mask);
-    rendered.copyTo(rendered_valid, rendered_valid_mask);
-    double fused_max = 0.0, rendered_max = 0.0;
-    cv::minMaxLoc(fused_valid, nullptr, &fused_max);
-    cv::minMaxLoc(rendered_valid, nullptr, &rendered_max);
-    const double visualization_max = std::max(1.0, std::min(80.0, std::max(fused_max, rendered_max)));
-    cv::Mat difference = cv::abs(fused - rendered);
-    difference.setTo(0, ~valid);
-    cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused_valid_mask, visualization_max));
-    cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered_valid_mask, visualization_max));
-    cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
+    if (saveDiagnosticImages(camera->frame_index_))
+    {
+        cv::Mat fused_valid, rendered_valid;
+        cv::Mat fused_valid_mask = (fused > 0.0f) & valid_region;
+        cv::Mat rendered_valid_mask = (rendered > 0.0f) & valid_region;
+        fused.copyTo(fused_valid, fused_valid_mask);
+        rendered.copyTo(rendered_valid, rendered_valid_mask);
+        double fused_max = 0.0, rendered_max = 0.0;
+        cv::minMaxLoc(fused_valid, nullptr, &fused_max);
+        cv::minMaxLoc(rendered_valid, nullptr, &rendered_max);
+        const double visualization_max = std::max(1.0, std::min(80.0, std::max(fused_max, rendered_max)));
+        cv::Mat difference = cv::abs(fused - rendered);
+        difference.setTo(0, ~valid);
+        cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused_valid_mask, visualization_max));
+        cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered_valid_mask, visualization_max));
+        cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
+    }
 
     std::vector<float> abs_errors;
     std::vector<float> lidar_abs_errors;
@@ -1552,8 +1644,9 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                 << farther_conflict_lidar.sum().item<int64_t>() << ','
                 << farther_conflict_dap.sum().item<int64_t>() << '\n';
 
-        saveMapExtensionImages(rendered_depth, rendered_alpha, diagnosis_mask,
-                               dataset->diagnosis_dir_, frame_index);
+        if (saveDiagnosticImages(frame_index))
+            saveMapExtensionImages(rendered_depth, rendered_alpha, diagnosis_mask,
+                                   dataset->diagnosis_dir_, frame_index);
     }
     
     /// densification
@@ -1746,7 +1839,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     torch::jit::script::Module m_lpips;
     try 
     {
-        m_lpips = torch::jit::load(lpips_path + "/lpips_alex.pt");
+        m_lpips = torch::jit::load(lpips_path + "/lpips_alex_valid.pt");
         m_lpips.to(torch::kCUDA);
     }
     catch (const c10::Error& e) 
@@ -1787,13 +1880,16 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             std::vector<torch::jit::IValue> inputs;
             inputs.push_back(metric_rendered.unsqueeze(0));
             inputs.push_back(metric_gt.unsqueeze(0));
+            auto lpips_mask = use_metric_mask ? metric_mask.to(torch::kFloat32)
+                : torch::ones_like(rendered_image.slice(0, 0, 1));
+            inputs.push_back(lpips_mask.reshape({1, 1, rendered_image.size(1), rendered_image.size(2)}));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
             {
                 const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
                 const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
                 std::ofstream metrics(metrics_path, std::ios::app);
-                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips\n";
-                metrics << train_camera->image_name_ << ",train," << psnr << ',' << ssim << ',' << lpips << '\n';
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol\n";
+                metrics << train_camera->image_name_ << ",train," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1\n";
             }
             psnrs += psnr;
             ssims += ssim;
@@ -1812,6 +1908,17 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
             cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
             cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
+
+            if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
+                export_depth != nullptr && std::string(export_depth) == "1" &&
+                saveDiagnosticImages(train_camera->frame_index_))
+            {
+                const std::string rgb_dir = diagnosis_dir_path + "/train_rgb_lossless";
+                fs::create_directories(rgb_dir);
+                const std::string name = fs::path(train_camera->image_name_).stem().string();
+                cv::imwrite(rgb_dir + "/" + name + "_render.png", a_img);
+                cv::imwrite(rgb_dir + "/" + name + "_gt.png", b_img);
+            }
 
             auto output_depth = use_metric_mask
                 ? rendered_depth.masked_fill(~metric_mask, 0.0f)
@@ -1837,6 +1944,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
         double lpipss = 0;
         for (const auto& test_camera : dataset->test_cameras_)
         {
+            test_camera->reloadObservations();
             auto render_pkg = render(test_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);
@@ -1860,13 +1968,16 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             std::vector<torch::jit::IValue> inputs;
             inputs.push_back(metric_rendered.unsqueeze(0));
             inputs.push_back(metric_gt.unsqueeze(0));
+            auto lpips_mask = use_metric_mask ? metric_mask.to(torch::kFloat32)
+                : torch::ones_like(rendered_image.slice(0, 0, 1));
+            inputs.push_back(lpips_mask.reshape({1, 1, rendered_image.size(1), rendered_image.size(2)}));
             double lpips = m_lpips.forward(inputs).toTensor().item<double>();
             {
                 const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
                 const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
                 std::ofstream metrics(metrics_path, std::ios::app);
-                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips\n";
-                metrics << test_camera->image_name_ << ",test," << psnr << ',' << ssim << ',' << lpips << '\n';
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol\n";
+                metrics << test_camera->image_name_ << ",test," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1\n";
             }
             psnrs += psnr;
             ssims += ssim;
@@ -1896,6 +2007,8 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             c_img.convertTo(c_img, CV_8UC1);
             cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
             cv::imwrite(render_depth_dir_path + "/" + test_camera->image_name_, c_img);
+            test_camera->releaseObservations();
+            fs::remove(test_camera->observation_cache_path_);
         }
         psnrs /= dataset->test_cameras_.size();
         ssims /= dataset->test_cameras_.size();
@@ -1904,4 +2017,5 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
         std::cout << std::fixed << std::setprecision(3) << "        [In-Sequence Novel View SSIM] " << ssims << std::endl;
         std::cout << std::fixed << std::setprecision(3) << "        [In-Sequence Novel View LPIPS] " << lpipss << std::endl;
     }
+    fs::remove(fs::path(result_path) / ".nonkeyframe_cache");
 }

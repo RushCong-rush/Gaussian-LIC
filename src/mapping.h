@@ -54,6 +54,7 @@
 class Params
 {
 public:
+    YAML::Node mapping_lidar_fov{YAML::NodeType::Undefined};
     Params(const YAML::Node &node)
     {
         height = node["height"].as<int>();
@@ -67,6 +68,8 @@ public:
         if (camera_model != "pinhole" && camera_model != "equirectangular" && camera_model != "erp")
             throw std::invalid_argument("Unsupported camera model: " + camera_model);
         equirectangular = camera_model != "pinhole";
+        if (node["mapping_lidar_fov"])
+            mapping_lidar_fov = node["mapping_lidar_fov"];
 
         select_every_k_frame = node["select_every_k_frame"].as<int>();
         depth_completion = node["depth_completion"].as<bool>();

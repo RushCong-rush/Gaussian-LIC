@@ -19,6 +19,7 @@ result/
 *.pth
 *.onnx
 *.engine
+src/lpips/lpips_alex_valid.pt
 
 third_party/
 
