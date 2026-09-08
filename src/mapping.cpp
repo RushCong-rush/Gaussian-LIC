@@ -456,6 +456,10 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         std::lock_guard<std::mutex> lock(m_buf);
         std::cout << "        [Peak Input Queue Payload MiB] "
                   << input_queue_stats.peak_payload_bytes / 1048576.0 << std::endl;
+        std::cout << "        [Input Queue Spilled Messages] " << input_queue_stats.spilled_messages << std::endl;
+        std::cout << "        [Input Queue Spilled MiB] " << input_queue_stats.spilled_bytes / 1048576.0 << std::endl;
+        std::cout << "        [Input Queue Write Time] " << input_queue_stats.write_seconds << "s" << std::endl;
+        std::cout << "        [Input Queue Read Time] " << input_queue_stats.read_seconds << "s" << std::endl;
     }
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
@@ -518,6 +522,17 @@ int main(int argc, char** argv)
     std::string lpips_path;
     nh.param<std::string>("lpips_path", lpips_path, "");
 
+    const int queue_memory_mib = config_node["input_queue_memory_mib"]
+        ? config_node["input_queue_memory_mib"].as<int>() : 256;
+    if (queue_memory_mib < 0)
+        throw std::invalid_argument("input_queue_memory_mib must be nonnegative (0 = unlimited)");
+    input_queue_stats.memory_limit_bytes = static_cast<size_t>(queue_memory_mib) * 1048576;
+    const fs::path queue_cache = fs::path(result_path) / ".input_queue_cache";
+    point_buf.setCacheDirectory(queue_cache / "points");
+    image_buf.setCacheDirectory(queue_cache / "images");
+    depth_buf.setCacheDirectory(queue_cache / "depth");
+    dap_depth_buf.setCacheDirectory(queue_cache / "dap");
+
     std::thread mapping_process(mapping, config_node, result_path, lpips_path);
     std::thread monitor_thread([](){
         while (!exit_flag) 
@@ -548,6 +563,7 @@ int main(int argc, char** argv)
 
     mapping_process.join();
     monitor_thread.join();
+    fs::remove_all(queue_cache);
     
     return dap_sync_error ? 2 : 0;
 }
