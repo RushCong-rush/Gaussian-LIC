@@ -31,17 +31,19 @@
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "input_queue.h"
 
 namespace fs = std::filesystem;
 
 std::mutex m_buf;
 std::condition_variable con;
 
-std::queue<sensor_msgs::PointCloud2ConstPtr> point_buf;
+InputQueueStats input_queue_stats;
+InputQueue<sensor_msgs::PointCloud2ConstPtr> point_buf(input_queue_stats);
 std::queue<geometry_msgs::PoseStampedConstPtr> pose_buf;
-std::queue<sensor_msgs::ImageConstPtr> image_buf;
-std::queue<sensor_msgs::ImageConstPtr> depth_buf;
-std::queue<sensor_msgs::ImageConstPtr> dap_depth_buf;
+InputQueue<sensor_msgs::ImageConstPtr> image_buf(input_queue_stats);
+InputQueue<sensor_msgs::ImageConstPtr> depth_buf(input_queue_stats);
+InputQueue<sensor_msgs::ImageConstPtr> dap_depth_buf(input_queue_stats);
 
 std::atomic<bool> exit_flag(false);
 std::atomic<double> last_point_time(0.0);
@@ -450,6 +452,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     }
 
     /// [6] evaluation
+    {
+        std::lock_guard<std::mutex> lock(m_buf);
+        std::cout << "        [Peak Input Queue Payload MiB] "
+                  << input_queue_stats.peak_payload_bytes / 1048576.0 << std::endl;
+    }
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         1) Forward " << gaussians->t_forward_ << "s" << std::endl;
