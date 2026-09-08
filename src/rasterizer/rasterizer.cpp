@@ -59,7 +59,8 @@ GaussianRasterizerFunction::forward(
         raster_settings.debug_,
         raster_settings.no_color_,
         raster_settings.equirectangular_,
-        raster_settings.save_backward_
+        raster_settings.save_backward_,
+        raster_settings.valid_mask_
     );
     auto num_rendered = std::get<0>(rasterization_result);
     auto num_buckets = std::get<1>(rasterization_result);

@@ -153,6 +153,8 @@ public:
     torch::Tensor original_depth_;
     torch::Tensor diagnostic_depth_;
     torch::Tensor lidar_valid_mask_;
+    torch::Tensor raster_mask_;
+    torch::Tensor extension_raster_mask_;
           
     float fx_;
     float fy_;

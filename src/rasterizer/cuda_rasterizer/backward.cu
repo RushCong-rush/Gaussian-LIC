@@ -631,12 +631,12 @@ PerGaussianRenderCUDA(
 	const uint2 pix_min = {tile.x * BLOCK_X, tile.y * BLOCK_Y};
 
 	// values useful for gradient calculation
-	float T;
-	float last_contributor;
-	float ar[C];
-	float dL_dpixel[C];
-	float ad;
-	float dL_dpixel_depth;
+	float T = 0.0f;
+	float last_contributor = 0.0f;
+	float ar[C] = {0.0f};
+	float dL_dpixel[C] = {0.0f};
+	float ad = 0.0f;
+	float dL_dpixel_depth = 0.0f;
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
@@ -657,22 +657,23 @@ PerGaussianRenderCUDA(
 	{
 		if (i % 32 == 0)
 		{
-			for (int ch = 0; ch < C; ++ch) 
-			{
-				int shift = BLOCK_SIZE * ch + i + block.thread_rank();
-				Shared_sampled_ar[ch * 32 + block.thread_rank()] = sampled_ar[shift];
-			}
 			const uint32_t local_id = i + block.thread_rank();
 			const uint2 pix = {pix_min.x + local_id % BLOCK_X, pix_min.y + local_id / BLOCK_X};
 			const uint32_t id = W * pix.y + pix.x;
+			// Masked/terminated pixels have no sample for this bucket. The last
+			// 31 pipeline steps only drain registers, not another pixel batch.
+			const bool sampled = local_id < BLOCK_SIZE && pix.x < W && pix.y < H &&
+				n_contrib[id] > bucket_idx_in_tile * 32;
 			for (int ch = 0; ch < C; ++ch) 
 			{
-				Shared_pixels[ch * 32 + block.thread_rank()] = pixel_colors[ch * H * W + id];
+				Shared_sampled_ar[ch * 32 + block.thread_rank()] = sampled
+					? sampled_ar[BLOCK_SIZE * ch + local_id] : 0.0f;
+				Shared_pixels[ch * 32 + block.thread_rank()] = sampled
+					? pixel_colors[ch * H * W + id] : 0.0f;
 			}
 
-			int shift = i + block.thread_rank();
-			Shared_sampled_ad[block.thread_rank()] = sampled_ad[shift];
-			Shared_pixels_depth[block.thread_rank()] = pixel_depth[id];
+			Shared_sampled_ad[block.thread_rank()] = sampled ? sampled_ad[local_id] : 0.0f;
+			Shared_pixels_depth[block.thread_rank()] = sampled ? pixel_depth[id] : 0.0f;
 
 			block.sync();
 		}
@@ -703,12 +704,13 @@ PerGaussianRenderCUDA(
 		// if (valid_splat && valid_pixel && my_warp.thread_rank() == 0 && idx < end)  //
 		if (valid_splat && valid_pixel && my_warp.thread_rank() == 0 && idx < BLOCK_SIZE) 
 		{
-			T = sampled_T[global_bucket_idx * BLOCK_SIZE + idx];
+			last_contributor = n_contrib[pix_id];
+			T = last_contributor > bucket_idx_in_tile * 32
+				? sampled_T[global_bucket_idx * BLOCK_SIZE + idx] : 0.0f;
 			int ii = i % 32;
 			for (int ch = 0; ch < C; ++ch)
 				ar[ch] = -Shared_pixels[ch * 32 + ii] + Shared_sampled_ar[ch * 32 + ii];
 			ad = -Shared_pixels_depth[ii] + Shared_sampled_ad[ii];
-			last_contributor = n_contrib[pix_id];
 			for (int ch = 0; ch < C; ++ch) 
 			{ 
 				dL_dpixel[ch] = dL_dpixels[ch * H * W + pix_id]; 

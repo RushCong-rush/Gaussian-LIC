@@ -73,7 +73,8 @@ RasterizeGaussiansCUDA(
     const torch::Tensor& campos,
     const bool prefiltered,
     const bool debug, const bool no_color, const bool equirectangular,
-    const bool save_backward)
+    const bool save_backward,
+    const torch::Tensor& valid_mask)
 {
     if (means3D.ndimension() != 2 || means3D.size(1) != 3) 
     { 
@@ -83,6 +84,14 @@ RasterizeGaussiansCUDA(
     const int P = means3D.size(0);
     const int H = image_height;
     const int W = image_width;
+    const bool has_mask = valid_mask.defined() && valid_mask.numel() > 0;
+    if (has_mask)
+    {
+        TORCH_CHECK(valid_mask.device() == means3D.device() &&
+                    valid_mask.scalar_type() == torch::kBool && valid_mask.is_contiguous() &&
+                    valid_mask.dim() == 2 && valid_mask.size(0) == H && valid_mask.size(1) == W,
+                    "valid_mask must be a contiguous H x W bool tensor on the Gaussian device");
+    }
     int M = 0;
     if(sh.size(0) != 0) 
     { 
@@ -142,7 +151,8 @@ RasterizeGaussiansCUDA(
             out_final_T.contiguous().data<float>(),
             out_depth.contiguous().data<float>(),
             radii.contiguous().data<int>(),
-            debug, no_color, equirectangular, save_backward);
+            debug, no_color, equirectangular, save_backward,
+            has_mask ? valid_mask.data_ptr<bool>() : nullptr);
             
         rendered = std::get<0>(tup);
         num_buckets = std::get<1>(tup);

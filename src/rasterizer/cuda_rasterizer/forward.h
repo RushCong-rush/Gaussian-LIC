@@ -133,7 +133,8 @@ namespace FORWARD
 		float* out_depth,
 		bool no_color,
 		bool equirectangular,
-		bool save_backward);
+		bool save_backward,
+		const bool* valid_mask);
 }
 
 

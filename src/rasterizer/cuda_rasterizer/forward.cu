@@ -412,7 +412,8 @@ renderCUDA(
 	float* __restrict__ out_final_T,
 	float* __restrict__ out_depth,
 	bool no_color,
-	bool equirectangular)
+	bool equirectangular,
+	const bool* __restrict__ valid_mask)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -426,7 +427,7 @@ renderCUDA(
 	// Check if this thread is associated with a valid pixel or outside.
 	bool inside = pix.x < W&& pix.y < H;
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	bool done = !inside || (valid_mask && !valid_mask[pix_id]);
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint32_t tile_id = block.group_index().y * horizontal_blocks + block.group_index().x;
@@ -584,7 +585,8 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	float* out_depth,
 	bool no_color,
 	bool equirectangular,
-	bool save_backward)
+	bool save_backward,
+	const bool* valid_mask)
 {
 	// Keep the training kernel free of runtime inference-cache branches.
 	auto launch = [&](auto inference)
@@ -606,7 +608,8 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 			out_final_T,
 			out_depth,
 			no_color,
-			equirectangular);
+			equirectangular,
+			valid_mask);
 	};
 	if (save_backward) launch(std::false_type{});
 	else launch(std::true_type{});

@@ -359,6 +359,74 @@ void checkInferenceCache()
     }
 }
 
+void checkIrregularMask(const int height = kHeight, const int width = kWidth)
+{
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::manual_seed(0);
+    auto means = torch::tensor({{0.1f, 0.5f, -5.0f}, {0.0f, 0.2f, 5.0f}}, options).repeat({24, 1});
+    const auto n = means.size(0);
+    auto empty = torch::empty({0}, options);
+    auto background = torch::ones({3}, options);
+    auto view = torch::eye(4, options);
+    auto camera = torch::zeros({3}, options);
+    auto dc = torch::full({n, 1, 3}, 0.3f, options);
+    auto opacity = torch::full({n, 1}, 0.2f, options);
+    auto scales = torch::full({n, 3}, 0.6f, options);
+    auto rotations = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}, options).repeat({n, 1});
+    auto x = torch::arange(width, options).reshape({1, width});
+    auto y = torch::arange(height, options).reshape({height, 1});
+    auto full = torch::ones({height, width}, options.dtype(torch::kBool));
+    auto holes = (((x - 64).square() + (y - 32).square()) > 150) &
+                 (((x - 6).square() + (y - 28).square()) > 120) &
+                 (((x - 124).square() + (y - 30).square()) > 160) & (y < 43);
+    auto single = (x == 1) & (y == 32);
+    for (const bool erp : {false, true})
+    {
+        auto render = [&](const torch::Tensor& mask, bool cache = true, bool no_color = false)
+        {
+            return RasterizeGaussiansCUDA(background, means, empty, opacity, scales, rotations, 1.0f, empty,
+                view, view, 1.0f, 1.0f, height, width, -1.0f, 1.0f, -1.0f, 1.0f,
+                dc, empty, 0, camera, false, true, no_color, erp, cache, mask);
+        };
+        const auto reference = render(torch::Tensor());
+        for (auto mask : {full, holes, single, ~full})
+        {
+            const auto masked = render(mask);
+            const auto inference = render(mask, false);
+            const auto depth_only = render(mask, false, true);
+            require(std::get<0>(reference) == std::get<0>(masked), "mask changed Gaussian binning");
+            require(torch::equal(std::get<5>(reference), std::get<5>(masked)), "mask changed Adam visibility");
+            require(torch::equal(std::get<2>(reference).masked_fill(~mask, 0), std::get<2>(masked)), "mask changed valid RGB");
+            require(torch::equal(std::get<3>(reference).masked_fill(~mask, 1), std::get<3>(masked)), "mask changed valid transmittance");
+            require(torch::equal(std::get<4>(reference).masked_fill(~mask, 0), std::get<4>(masked)), "mask changed valid depth");
+            require(torch::equal(std::get<2>(masked), std::get<2>(inference)), "masked inference RGB mismatch");
+            require(torch::equal(std::get<4>(masked), std::get<4>(inference)), "masked inference depth mismatch");
+            require(torch::equal(std::get<4>(masked), std::get<4>(depth_only)), "masked extend depth mismatch");
+            require(std::get<1>(masked) <= std::get<1>(reference), "mask increased cache buckets");
+            if (!mask.any().item<bool>()) require(std::get<1>(masked) == 0, "empty mask retained buckets");
+            auto color_grad = torch::randn({3, height, width}, options).masked_fill(~mask, 0);
+            auto depth_grad = torch::randn({height, width}, options).masked_fill(~mask, 0);
+            auto backward = [&](const ForwardResult& result)
+            {
+                return RasterizeGaussiansBackwardCUDA(background, means, std::get<5>(result), empty,
+                    scales, rotations, 1.0f, empty, view, view, 1.0f, 1.0f,
+                    -1.0f, 1.0f, -1.0f, 1.0f, color_grad, depth_grad, dc, empty, 0, camera,
+                    std::get<6>(result), std::get<0>(result), std::get<7>(result), std::get<8>(result),
+                    std::get<1>(result), std::get<9>(result), 0.0f, true, erp);
+            };
+            const auto a = backward(reference);
+            const auto b = backward(masked);
+            auto vector = [](const auto& tuple) {
+                return std::apply([](const auto&... tensors) { return std::vector<torch::Tensor>{tensors...}; }, tuple);
+            };
+            const auto expected = vector(a), actual = vector(b);
+            for (size_t i = 0; i < actual.size(); ++i)
+                require(torch::isfinite(actual[i]).all().item<bool>() &&
+                        torch::allclose(expected[i], actual[i], 1e-4, 1e-5), "mask changed valid gradients");
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     torch::NoGradGuard no_grad;
@@ -419,6 +487,8 @@ int main(int argc, char** argv)
     checkErpGradients();
     checkMixedSeamTileCounts();
     checkInferenceCache();
+    checkIrregularMask();
+    checkIrregularMask(61, 125);
 
     if (argc == 2)
     {

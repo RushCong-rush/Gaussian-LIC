@@ -74,6 +74,7 @@ struct GaussianRasterizationSettings
     float lambda_erank_;
     bool equirectangular_;
     bool save_backward_ = true;
+    torch::Tensor valid_mask_;
 };
 
 class GaussianRasterizerFunction : public torch::autograd::Function<GaussianRasterizerFunction>

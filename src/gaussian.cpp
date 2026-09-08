@@ -724,6 +724,8 @@ void Dataset::addFrame(Frame& cur_frame)
         cam->full_lidar_reference_path_ = full_lidar_reference_path;
 
         cam->setCameraModel(equirectangular_);
+        cam->raster_mask_ = raster_mask_;
+        cam->extension_raster_mask_ = extension_raster_mask_;
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
         cam->setPose(q_wc.toRotationMatrix(), t_wc);
 
@@ -750,6 +752,8 @@ void Dataset::addFrame(Frame& cur_frame)
         cam->frame_index_ = frame_index;
 
         cam->setCameraModel(equirectangular_);
+        cam->raster_mask_ = raster_mask_;
+        cam->extension_raster_mask_ = extension_raster_mask_;
         cam->setIntrinsic(width, height, fx_, fy_, cx_, cy_);
         cam->setPose(q_wc.toRotationMatrix(), t_wc);
 

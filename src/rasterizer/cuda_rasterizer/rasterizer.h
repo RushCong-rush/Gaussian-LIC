@@ -59,7 +59,8 @@ namespace CudaRasterizer {
 			bool debug = false,
 			bool no_color = false,
 			bool equirectangular = false,
-			bool save_backward = true);
+			bool save_backward = true,
+			const bool* valid_mask = nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R, int B,

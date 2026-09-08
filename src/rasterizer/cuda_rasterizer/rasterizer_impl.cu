@@ -359,6 +359,16 @@ __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* rang
 		ranges[currtile].y = L;
 }
 
+__global__ void maskTileRanges(int W, int H, const bool* valid_mask, uint2* ranges)
+{
+	const int x = blockIdx.x * BLOCK_X + threadIdx.x;
+	const int y = blockIdx.y * BLOCK_Y + threadIdx.y;
+	const bool valid = x < W && y < H && valid_mask[y * W + x];
+	const int any_valid = __syncthreads_or(valid);
+	if (threadIdx.x == 0 && threadIdx.y == 0 && !any_valid)
+		ranges[blockIdx.y * gridDim.x + blockIdx.x] = make_uint2(0, 0);
+}
+
 // for each tile, see how many buckets/warps are needed to store the state
 __global__ void perTileBucketCount(int T, uint2* ranges, uint32_t* bucketCount) 
 {
@@ -483,7 +493,8 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 	float* out_final_T,
 	float* out_depth,
 	int* radii,
-	bool debug, bool no_color, bool equirectangular, bool save_backward)
+	bool debug, bool no_color, bool equirectangular, bool save_backward,
+	const bool* valid_mask)
 {
 	if (NUM_CHAFFELS != 3 && colors_precomp == nullptr) 
 	{ 
@@ -595,6 +606,10 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 			imgState.ranges);
 	CHECK_CUDA(, debug)
 
+	if (valid_mask)
+		maskTileRanges<<<tile_grid, block>>>(width, height, valid_mask, imgState.ranges);
+	CHECK_CUDA(, debug)
+
 	save_backward = save_backward && !no_color;
 	SampleState sampleState{};
 	unsigned int bucket_sum = 0;
@@ -628,7 +643,7 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		imgState.max_contrib,
 		background,
-		out_color, out_final_T, out_depth, no_color, equirectangular, save_backward), debug)
+		out_color, out_final_T, out_depth, no_color, equirectangular, save_backward, valid_mask), debug)
 
 	if (save_backward)
 	{

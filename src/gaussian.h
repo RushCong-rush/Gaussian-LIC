@@ -92,6 +92,18 @@ public:
             cv::Mat mask_float;
             metric_mask_cv_.convertTo(mask_float, CV_32FC1, 1.0 / 255.0);
             metric_mask_ = tensor_utils::cvMat2TorchTensor_Float32(mask_float, torch::kCPU).gt(0.5);
+            if (equirectangular_)
+            {
+                raster_mask_ = metric_mask_.to(torch::kCUDA).contiguous();
+                // Extend floors projected pixels; initialization checks rounded
+                // pixels. Retain their one-pixel neighborhood across the ERP seam.
+                cv::Mat padded, expanded;
+                cv::copyMakeBorder(metric_mask_cv_, padded, 0, 0, 1, 1, cv::BORDER_WRAP);
+                cv::dilate(padded, expanded, cv::Mat());
+                extension_raster_mask_ = torch::from_blob(expanded.data,
+                    {prm.height, prm.width + 2}, torch::kUInt8)
+                    .narrow(1, 1, prm.width).gt(0).to(torch::kCUDA).contiguous();
+            }
         }
         if (depth_completion_)
             depth_completer_ = std::make_unique<DepthCompleter>(prm.engine_path, prm.width, prm.height);
@@ -123,6 +135,8 @@ public:
     Eigen::Vector3d previous_keyframe_translation_ = Eigen::Vector3d::Zero();
     cv::Mat metric_mask_cv_;
     torch::Tensor metric_mask_;
+    torch::Tensor raster_mask_;
+    torch::Tensor extension_raster_mask_;
 
 
     int all_frame_num_;

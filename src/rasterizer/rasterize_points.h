@@ -49,7 +49,8 @@ RasterizeGaussiansCUDA(
 	const bool prefiltered,
 	const bool debug, const bool no_color = false,
 	const bool equirectangular = false,
-	const bool save_backward = true);
+	const bool save_backward = true,
+	const torch::Tensor& valid_mask = torch::Tensor());
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
