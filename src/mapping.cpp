@@ -472,6 +472,9 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << std::fixed << std::setprecision(2) << "        [Total Online Render Time] " << total_online_render_time << "s" << std::endl;
     std::cout << "        [Online Rendered Frames] " << online_rendered_frames << std::endl;
     std::cout << "        [Total Nonkeyframe Cache Write Time] " << total_nonkeyframe_cache_write_time << "s" << std::endl;
+    // Final rendering and PLY export only need map parameters, not Adam moments.
+    gaussians->sparse_optimizer_.reset();
+    gaussians->exposure_optimizer_.reset();
     torch::NoGradGuard no_grad;
     evaluateVisualQuality(dataset, gaussians, result_path, lpips_path);
     gaussians->saveMap(result_path);
