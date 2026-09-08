@@ -64,8 +64,6 @@ inline torch::Tensor cvMat2TorchTensor_Float32(
     break;
     }
 
-    // Make CHW contiguous before pinning; a later copy would lose pinned storage.
-    tensor = tensor.contiguous();
     if (use_pinned_memory && device_type == torch::kCPU) 
     {
         tensor = tensor.pin_memory();
@@ -73,7 +71,7 @@ inline torch::Tensor cvMat2TorchTensor_Float32(
 
     tensor = tensor.to(device_type, /*non_blocking=*/use_pinned_memory);
 
-    return tensor;
+    return tensor.contiguous();
 }
 
 inline cv::Mat torchTensor2CvMat_Float32(torch::Tensor& tensor)
