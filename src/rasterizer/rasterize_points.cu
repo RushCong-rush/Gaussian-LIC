@@ -72,7 +72,8 @@ RasterizeGaussiansCUDA(
     const int degree,
     const torch::Tensor& campos,
     const bool prefiltered,
-    const bool debug, const bool no_color, const bool equirectangular)
+    const bool debug, const bool no_color, const bool equirectangular,
+    const bool save_backward)
 {
     if (means3D.ndimension() != 2 || means3D.size(1) != 3) 
     { 
@@ -141,7 +142,7 @@ RasterizeGaussiansCUDA(
             out_final_T.contiguous().data<float>(),
             out_depth.contiguous().data<float>(),
             radii.contiguous().data<int>(),
-            debug, no_color, equirectangular);
+            debug, no_color, equirectangular, save_backward);
             
         rendered = std::get<0>(tup);
         num_buckets = std::get<1>(tup);

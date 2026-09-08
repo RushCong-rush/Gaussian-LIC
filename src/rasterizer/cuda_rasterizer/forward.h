@@ -132,7 +132,8 @@ namespace FORWARD
 		float* out_final_T,
 		float* out_depth,
 		bool no_color,
-		bool equirectangular);
+		bool equirectangular,
+		bool save_backward);
 }
 
 

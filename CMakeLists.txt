@@ -98,6 +98,7 @@ target_link_libraries(gs_mapping
 
 add_executable(erp_rasterizer_forward_test
               ${PROJECT_SOURCE_DIR}/tests/test_erp_rasterizer_forward.cpp
+              ${PROJECT_SOURCE_DIR}/src/rasterizer/rasterizer.cpp
               ${PROJECT_SOURCE_DIR}/src/rasterizer/rasterize_points.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/adam.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/forward.cu

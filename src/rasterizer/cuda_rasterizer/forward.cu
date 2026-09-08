@@ -24,6 +24,7 @@
 #include <cub/cub.cuh>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <type_traits>
 namespace cg = cooperative_groups;
 
 constexpr float ERP_PI = 3.14159265358979323846f;
@@ -392,7 +393,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	tiles_touched[idx] = tile_count;
 }
 
-template <uint32_t CHANNELS>
+template <uint32_t CHANNELS, bool INFERENCE>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -435,7 +436,7 @@ renderCUDA(
 
 	// what is the number of buckets before me? what is my offset?
 	uint32_t bbm = 0;
-	if (!no_color) 
+	if (!no_color && !INFERENCE)
 	{
 		bbm = tile_id == 0 ? 0 : per_tile_bucket_offset[tile_id - 1];
 		// let's first quickly also write the bucket-to-tile mapping
@@ -488,7 +489,7 @@ renderCUDA(
 		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++) 
 		{
 			// add incoming T value for every 32nd gaussian
-			if (j % 32 == 0 && !no_color) 
+			if (j % 32 == 0 && !no_color && !INFERENCE)
 			{
 				sampled_T[(bbm * BLOCK_SIZE) + block.thread_rank()] = T;  //
 				for (int ch = 0; ch < CHANNELS; ++ch) 
@@ -545,13 +546,14 @@ renderCUDA(
 		out_final_T[pix_id] = T;
 			if (!no_color)
 			{
-				n_contrib[pix_id] = last_contributor;
+				if (!INFERENCE)
+					n_contrib[pix_id] = last_contributor;
 				for (int ch = 0; ch < CHANNELS; ch++)
 					out_color[ch * H * W + pix_id] = C[ch];
 			}
 			out_depth[pix_id] = contributor_real ? depth_render / (1 - T) : 0.f;
 	}
-	if (no_color) { return; }
+	if (no_color || INFERENCE) { return; }
 
 	// max reduce the last contributor
     // typedef cub::BlockReduce<uint32_t, BLOCK_SIZE> BlockReduce;
@@ -581,26 +583,33 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	float* out_final_T,
 	float* out_depth,
 	bool no_color,
-	bool equirectangular)
+	bool equirectangular,
+	bool save_backward)
 {
-	renderCUDA<NUM_CHAFFELS> <<<grid, block>>> (
-		ranges,
-		point_list,
-		per_tile_bucket_offset, bucket_to_tile,
-		sampled_T, sampled_ar, sampled_ad,
-		W, H,
-		means2D,
-		depths,
-		colors,
-		conic_opacity,
-		n_contrib,
-		max_contrib,
-		bg_color,
-		out_color,
-		out_final_T,
-		out_depth,
-		no_color,
-		equirectangular);
+	// Keep the training kernel free of runtime inference-cache branches.
+	auto launch = [&](auto inference)
+	{
+		renderCUDA<NUM_CHAFFELS, decltype(inference)::value> <<<grid, block>>> (
+			ranges,
+			point_list,
+			per_tile_bucket_offset, bucket_to_tile,
+			sampled_T, sampled_ar, sampled_ad,
+			W, H,
+			means2D,
+			depths,
+			colors,
+			conic_opacity,
+			n_contrib,
+			max_contrib,
+			bg_color,
+			out_color,
+			out_final_T,
+			out_depth,
+			no_color,
+			equirectangular);
+	};
+	if (save_backward) launch(std::false_type{});
+	else launch(std::true_type{});
 }
 
 void FORWARD::preprocess(int P, int D, int M,

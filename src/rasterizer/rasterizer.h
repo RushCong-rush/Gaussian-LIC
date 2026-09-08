@@ -73,6 +73,7 @@ struct GaussianRasterizationSettings
     bool no_color_;
     float lambda_erank_;
     bool equirectangular_;
+    bool save_backward_ = true;
 };
 
 class GaussianRasterizerFunction : public torch::autograd::Function<GaussianRasterizerFunction>

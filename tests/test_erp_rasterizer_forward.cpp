@@ -7,7 +7,7 @@
 
 #include <torch/torch.h>
 
-#include "rasterizer/rasterize_points.h"
+#include "rasterizer/rasterizer.h"
 
 namespace
 {
@@ -310,6 +310,55 @@ void checkMixedSeamTileCounts()
     require(tileCount(means.flip({0})) == expected, "tile count depends on Gaussian ordering");
 }
 
+void checkInferenceCache()
+{
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto means = torch::tensor({{0.1f, 0.5f, -5.0f}, {0.0f, 0.2f, 5.0f}}, options).repeat({24, 1});
+    const auto n = means.size(0);
+    auto empty = torch::empty({0}, options);
+    auto background = torch::zeros({3}, options);
+    auto view = torch::eye(4, options);
+    auto camera = torch::zeros({3}, options);
+    auto dc = torch::full({n, 1, 3}, 0.3f, options);
+    auto opacity = torch::full({n, 1}, 0.2f, options);
+    auto scales = torch::full({n, 3}, 0.4f, options);
+    auto rotations = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}, options).repeat({n, 1});
+    for (const bool erp : {false, true})
+    {
+        auto render = [&](const bool cache)
+        {
+            return RasterizeGaussiansCUDA(
+                background, means, empty, opacity, scales, rotations, 1.0f, empty,
+                view, view, 1.0f, 1.0f, kHeight, kWidth,
+                -1.0f, 1.0f, -1.0f, 1.0f, dc, empty, 0, camera,
+                false, true, false, erp, cache);
+        };
+        const auto cached = render(true);
+        const auto inference = render(false);
+        require(std::get<0>(cached) == std::get<0>(inference), "inference changed tile counts");
+        require(torch::equal(std::get<2>(cached), std::get<2>(inference)), "inference changed RGB");
+        require(torch::equal(std::get<3>(cached), std::get<3>(inference)), "inference changed transmittance");
+        require(torch::equal(std::get<4>(cached), std::get<4>(inference)), "inference changed depth");
+        require(torch::equal(std::get<5>(cached), std::get<5>(inference)), "inference changed radii");
+        require(std::get<1>(cached) > 0 && std::get<9>(cached).numel() > 0, "training cache missing");
+        require(std::get<1>(inference) == 0 && std::get<9>(inference).numel() == 0, "unused inference cache retained");
+
+        GaussianRasterizationSettings settings(kHeight, kWidth, 1.0f, 1.0f,
+            -1.0f, 1.0f, -1.0f, 1.0f, background, 1.0f, view, view, 0, camera,
+            false, true, false, 0.0f, erp);
+        GaussianRasterizer rasterizer(settings);
+        auto no_grad = rasterizer.forward(means, empty, opacity, dc, empty, empty, scales, rotations, empty);
+        require(!std::get<0>(no_grad).requires_grad(), "inference retained autograd graph");
+        torch::AutoGradMode enable_grad(true);
+        auto train_means = means.clone().set_requires_grad(true);
+        auto train = rasterizer.forward(train_means, empty, opacity, dc, empty, empty, scales, rotations, empty);
+        require(torch::equal(std::get<0>(no_grad), std::get<0>(train)), "GradMode changed RGB");
+        (std::get<0>(train).sum() + std::get<2>(train).sum()).backward();
+        require(train_means.grad().defined() && torch::isfinite(train_means.grad()).all().item<bool>(),
+                "training backward lost its cache");
+    }
+}
+
 int main(int argc, char** argv)
 {
     torch::NoGradGuard no_grad;
@@ -369,6 +418,7 @@ int main(int argc, char** argv)
 
     checkErpGradients();
     checkMixedSeamTileCounts();
+    checkInferenceCache();
 
     if (argc == 2)
     {

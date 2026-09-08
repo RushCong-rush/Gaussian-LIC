@@ -58,7 +58,8 @@ GaussianRasterizerFunction::forward(
         raster_settings.prefiltered_,
         raster_settings.debug_,
         raster_settings.no_color_,
-        raster_settings.equirectangular_
+        raster_settings.equirectangular_,
+        raster_settings.save_backward_
     );
     auto num_rendered = std::get<0>(rasterization_result);
     auto num_buckets = std::get<1>(rasterization_result);
@@ -203,6 +204,8 @@ GaussianRasterizer::forward(
 
 {
     auto raster_settings = this->raster_settings_;
+    // Custom autograd forward disables GradMode even during training.
+    raster_settings.save_backward_ = torch::GradMode::is_enabled();
     torch::TensorOptions options;
     colors_precomp = torch::tensor({}, options.device(torch::kCUDA));
     cov3D_precomp = torch::tensor({}, options.device(torch::kCUDA));
