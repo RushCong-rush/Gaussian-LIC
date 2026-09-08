@@ -1136,8 +1136,8 @@ void GaussianModel::densificationPostfix(
         {
             auto stored_state = state_it->second;
 
-            stored_state.exp_avg = torch::cat({stored_state.exp_avg.clone(), torch::zeros_like(extension_tensor)}, /*dim=*/0);
-            stored_state.exp_avg_sq = torch::cat({stored_state.exp_avg_sq.clone(), torch::zeros_like(extension_tensor)}, /*dim=*/0);
+            stored_state.exp_avg = torch::cat({stored_state.exp_avg, torch::zeros_like(extension_tensor)}, /*dim=*/0);
+            stored_state.exp_avg_sq = torch::cat({stored_state.exp_avg_sq, torch::zeros_like(extension_tensor)}, /*dim=*/0);
 
             optimizer_state.erase(state_it);
 
