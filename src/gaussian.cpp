@@ -738,7 +738,9 @@ void Dataset::addFrame(Frame& cur_frame)
         cv::Mat& supervision_depth =
             (cur_frame.dap_depth_msg && !dap_dense_depth_supervision_) ? lidar_depth : depth_map;
         cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(supervision_depth, torch::kCPU);
-        cam->diagnostic_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);
+        cam->diagnostic_depth_ = supervision_depth.data == depth_map.data
+            ? cam->original_depth_
+            : tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);
         cam->lidar_valid_mask_ = lidar_valid_tensor;
 
         std::stringstream ss;
