@@ -127,7 +127,7 @@ private:
             auto& exp_avg_sq = state.exp_avg_sq;
             int64_t M = param.numel() / N_;
 
-            torch::Tensor grad = param.grad().clone();
+            torch::Tensor grad = param.grad();
 
             adamUpdate(param, grad, exp_avg, exp_avg_sq, visibility_,
                     lr, 0.9, 0.999, eps, N_, M);
