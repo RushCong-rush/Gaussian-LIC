@@ -12,6 +12,8 @@ online_dap: true
 dap_topic: /depth_dap_for_gs
 dap_dense_depth_supervision: false
 patch_size: 10
+# 0 keeps original LiDAR seeds; positive sizes enable independent patch sampling.
+lidar_patch_size: 0
 max_depth: 120
 map_extension_min_depth_gap_m: 0.25
 map_extension_relative_depth_gap: 0.1

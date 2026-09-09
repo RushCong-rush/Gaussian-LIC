@@ -888,11 +888,11 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     int num = static_cast<int>(dataset->pointcloud_.size());
     std::vector<int> seed_indices(num);
     std::iota(seed_indices.begin(), seed_indices.end(), 0);
-    if (dataset->lidar_patch_sampling_)
+    if (dataset->lidar_patch_size_ > 0)
     {
         const auto& camera = dataset->train_cameras_.back();
         const int width = camera->image_width_, height = camera->image_height_;
-        LidarPatchSampler sampler(width, height, dataset->patch_size_);
+        LidarPatchSampler sampler(width, height, dataset->lidar_patch_size_);
         const int lidar_count = num - static_cast<int>(dataset->dap_seed_count_);
         const Eigen::Matrix3d R_cw = dataset->R_wc_.back().transpose();
         for (int i = 0; i < lidar_count; ++i)
@@ -1600,11 +1600,11 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto valid_flag = geometrically_valid & (alpha_open | depth_rescued);
 
     // Subsample only after both extend paths have admitted their candidates.
-    if (dataset->lidar_patch_sampling_)
+    if (dataset->lidar_patch_size_ > 0)
     {
         auto eligible_cpu = valid_flag.to(torch::kCPU).contiguous();
         const bool* eligible = eligible_cpu.data_ptr<bool>();
-        LidarPatchSampler sampler(W, H, dataset->patch_size_);
+        LidarPatchSampler sampler(W, H, dataset->lidar_patch_size_);
         std::vector<uint8_t> keep(keep_indices.size(), 0);
         for (size_t i = 0; i < keep_indices.size(); ++i)
         {

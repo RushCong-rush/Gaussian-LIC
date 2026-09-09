@@ -318,7 +318,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     online_dap_enabled = prm.online_dap;
     std::cout << "        [SH Degree] " << prm.sh_degree << std::endl;
     std::cout << "        [Seed Patch Size] " << prm.patch_size
-              << " [LiDAR Patch Sampling] " << prm.lidar_patch_sampling << std::endl;
+              << " [LiDAR Patch Size] " << prm.lidar_patch_size << std::endl;
     std::cout << "        [Map Extension Min Depth Gap] "
               << prm.map_extension_min_depth_gap_m << " m" << std::endl;
     std::cout << "        [Map Extension Relative Depth Gap] "
