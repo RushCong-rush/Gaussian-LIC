@@ -46,6 +46,7 @@
 
 #include "depth_completer.h"
 #include "lidar_angular_band.h"
+#include "lidar_patch_sampler.h"
 #include "diagnostic_output.h"
 
 const double C0 = 0.28209479177387814;
@@ -63,7 +64,8 @@ public:
         dap_dense_depth_supervision_(prm.dap_dense_depth_supervision),
         dap_initialize_gaussians_(prm.dap_initialize_gaussians),
         dap_seed_lidar_dilation_pixels_(prm.dap_seed_lidar_dilation_pixels),
-        patch_size_(prm.patch_size), min_point_depth_(prm.min_point_depth), max_depth_(prm.max_depth),
+        patch_size_(prm.patch_size), lidar_patch_sampling_(prm.lidar_patch_sampling),
+        min_point_depth_(prm.min_point_depth), max_depth_(prm.max_depth),
         all_frame_num_(0), is_keyframe_current_(false)
     {
         if (prm.mapping_lidar_fov)
@@ -127,6 +129,7 @@ public:
     bool dap_initialize_gaussians_;
     int dap_seed_lidar_dilation_pixels_;
     int patch_size_;
+    bool lidar_patch_sampling_;
     double min_point_depth_;
     double max_depth_;
     std::string diagnosis_dir_;

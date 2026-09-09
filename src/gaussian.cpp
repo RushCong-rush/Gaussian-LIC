@@ -886,6 +886,44 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
 {
     /// foreground
     int num = static_cast<int>(dataset->pointcloud_.size());
+    std::vector<int> seed_indices(num);
+    std::iota(seed_indices.begin(), seed_indices.end(), 0);
+    if (dataset->lidar_patch_sampling_)
+    {
+        const auto& camera = dataset->train_cameras_.back();
+        const int width = camera->image_width_, height = camera->image_height_;
+        LidarPatchSampler sampler(width, height, dataset->patch_size_);
+        const int lidar_count = num - static_cast<int>(dataset->dap_seed_count_);
+        const Eigen::Matrix3d R_cw = dataset->R_wc_.back().transpose();
+        for (int i = 0; i < lidar_count; ++i)
+        {
+            const Eigen::Vector3d p = R_cw *
+                (dataset->pointcloud_[i] - dataset->t_wc_.back());
+            double u, v, depth;
+            if (dataset->equirectangular_)
+            {
+                depth = p.norm();
+                u = std::fmod((std::atan2(p.x(), p.z()) / M_PI + 1.0) * 0.5 * width, width);
+                v = (0.5 - std::atan2(-p.y(), std::hypot(p.x(), p.z())) / M_PI) * height;
+            }
+            else
+            {
+                depth = p.z();
+                if (depth <= 0.0) continue;
+                u = dataset->fx_ * p.x() / depth + dataset->cx_;
+                v = dataset->fy_ * p.y() / depth + dataset->cy_;
+            }
+            sampler.consider(i, static_cast<int>(std::floor(u)),
+                             static_cast<int>(std::floor(v)), depth);
+        }
+        std::vector<bool> keep(num, false);
+        for (int index : sampler.indices())
+            if (index >= 0) keep[index] = true;
+        seed_indices.clear();
+        for (int i = 0; i < num; ++i)
+            if (i >= lidar_count || keep[i]) seed_indices.push_back(i);
+        num = static_cast<int>(seed_indices.size());
+    }
     assert(num > 0);
     torch::Tensor fused_point_cloud = torch::zeros({num, 3}, torch::kFloat32).cuda();  // (n, 3)
     int deg_2 = (sh_degree_ + 1) * (sh_degree_ + 1);
@@ -895,8 +933,9 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     double f = (dataset->fx_ + dataset->fy_) / 2;
     for (int i = 0; i < num; ++i) 
     {
-        auto& pt_w = dataset->pointcloud_[i];
-        auto& color = dataset->pointcolor_[i];
+        const int seed_index = seed_indices[i];
+        auto& pt_w = dataset->pointcloud_[seed_index];
+        auto& color = dataset->pointcolor_[seed_index];
         fused_point_cloud.index({i, 0}) = pt_w.x();
         fused_point_cloud.index({i, 1}) = pt_w.y();
         fused_point_cloud.index({i, 2}) = pt_w.z();
@@ -904,7 +943,7 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
         features.index({i, 1, 0}) = RGB2SH(color.y());
         features.index({i, 2, 0}) = RGB2SH(color.z());
 
-        double d = dataset->pointdepth_[i];
+        double d = dataset->pointdepth_[seed_index];
         scales.index({i}) = std::log(scaling_scale_ * d / f);
     }
     scales = scales.unsqueeze(1).repeat({1, 3});  // (n, 3)
@@ -1559,6 +1598,31 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto depth_rescued = geometrically_valid & (~alpha_open) & closer_depth_conflict;
     if (!depthAwareMapExtensionEnabled()) depth_rescued = torch::zeros_like(depth_rescued);
     auto valid_flag = geometrically_valid & (alpha_open | depth_rescued);
+
+    // Subsample only after both extend paths have admitted their candidates.
+    if (dataset->lidar_patch_sampling_)
+    {
+        auto eligible_cpu = valid_flag.to(torch::kCPU).contiguous();
+        const bool* eligible = eligible_cpu.data_ptr<bool>();
+        LidarPatchSampler sampler(W, H, dataset->patch_size_);
+        std::vector<uint8_t> keep(keep_indices.size(), 0);
+        for (size_t i = 0; i < keep_indices.size(); ++i)
+        {
+            if (!eligible[i]) continue;
+            const int64_t source = keep_indices[i];
+            if (source >= raw_lidar_candidates)
+                keep[i] = 1;
+            else
+                sampler.consider(static_cast<int>(i),
+                    static_cast<int>(pixels_depth_a[source][0]),
+                    static_cast<int>(pixels_depth_a[source][1]), pixels_depth_a[source][2]);
+        }
+        for (int index : sampler.indices())
+            if (index >= 0) keep[index] = 1;
+        valid_flag = torch::from_blob(keep.data(),
+            {static_cast<int64_t>(keep.size())}, torch::kUInt8)
+            .to(points.device()).to(torch::kBool);
+    }
 
     auto filtered_pkg = std::make_tuple(
         filtered_points.index({valid_flag, torch::indexing::Slice()}),

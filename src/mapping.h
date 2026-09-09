@@ -74,6 +74,10 @@ public:
         select_every_k_frame = node["select_every_k_frame"].as<int>();
         depth_completion = node["depth_completion"].as<bool>();
         patch_size = node["patch_size"].as<int>();
+        if (patch_size <= 0)
+            throw std::invalid_argument("patch_size must be positive");
+        lidar_patch_sampling = node["lidar_patch_sampling"]
+            ? node["lidar_patch_sampling"].as<bool>() : false;
         min_point_depth = node["min_point_depth"] ? node["min_point_depth"].as<double>() : 0.0;
         max_depth = node["max_depth"].as<double>();
         map_extension_min_depth_gap_m = node["map_extension_min_depth_gap_m"]
@@ -135,6 +139,7 @@ public:
     int select_every_k_frame;
     bool depth_completion;
     int patch_size;
+    bool lidar_patch_sampling;
     double min_point_depth;
     double max_depth;
     double map_extension_min_depth_gap_m;
