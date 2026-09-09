@@ -261,36 +261,6 @@ void Dataset::addFrame(Frame& cur_frame)
         lidar_depth_pixels_filtered_mask = cv::countNonZero(filtered);
         lidar_depth.setTo(0.0f, metric_mask_cv_ == 0);
     }
-    std::string full_lidar_reference_path;
-    const int full_lidar_pixels = cv::countNonZero(lidar_depth > 0.0f);
-    if (lidar_band_enabled_)
-    {
-        if (diagnosis_dir_.empty())
-            throw std::runtime_error("LiDAR FOV experiment requires a diagnosis directory");
-        if (is_keyframe)
-        {
-            const std::string reference_dir = diagnosis_dir_ + "/full_lidar_reference";
-            fs::create_directories(reference_dir);
-            full_lidar_reference_path = reference_dir + "/" +
-                std::to_string(cur_frame.image_msg->header.stamp.toNSec()) + ".exr";
-            cv::imwrite(full_lidar_reference_path, lidar_depth);
-        }
-        if (lidar_band_.fraction < 1.0)
-            for (int y = 0; y < lidar_depth.rows; ++y)
-            {
-                const double latitude = (0.5 - double(y) / lidar_depth.rows) * M_PI;
-                float* row = lidar_depth.ptr<float>(y);
-                for (int x = 0; x < lidar_depth.cols; ++x)
-                {
-                    if (!(row[x] > 0.0f)) continue;
-                    const double longitude = (2.0 * x / lidar_depth.cols - 1.0) * M_PI;
-                    const Eigen::Vector3d ray(std::cos(latitude) * std::sin(longitude),
-                        -std::sin(latitude), std::cos(latitude) * std::cos(longitude));
-                    if (!lidar_band_.contains(row[x] * ray)) row[x] = 0.0f;
-                }
-            }
-    }
-    const int retained_lidar_pixels = cv::countNonZero(lidar_depth > 0.0f);
     cv::Mat depth_map = lidar_depth.clone();
     if (cur_frame.dap_depth_msg)
     {
@@ -487,7 +457,6 @@ void Dataset::addFrame(Frame& cur_frame)
     size_t lidar_points_filtered_near = 0;
     size_t lidar_points_filtered_mask = 0;
     size_t lidar_points_kept = 0;
-    size_t lidar_points_filtered_fov = 0;
     const Eigen::Matrix3d R_cw = q_wc.toRotationMatrix().transpose();
     const Eigen::Vector3d t_cw = -R_cw * t_wc;
     for (const auto& pt : cloud->points)
@@ -540,11 +509,6 @@ void Dataset::addFrame(Frame& cur_frame)
             add_color(u1, v1, du * dv);
             point_color = weighted_color / valid_weight;
         }
-        if (lidar_band_enabled_ && !lidar_band_.contains(pt_c))
-        {
-            ++lidar_points_filtered_fov;
-            continue;
-        }
         pointcloud_.emplace_back(pt_w);
         pointcolor_.emplace_back(point_color);
         ++lidar_points_kept;
@@ -553,19 +517,6 @@ void Dataset::addFrame(Frame& cur_frame)
         pointdepth_.push_back(static_cast<float>(point_depth));
     }
 
-    if (lidar_band_enabled_)
-    {
-        const std::string path = diagnosis_dir_ + "/lidar_fov_metrics.csv";
-        const bool header = !fs::exists(path);
-        std::ofstream stream(path, std::ios::app);
-        if (header)
-            stream << "frame_index,timestamp_ns,is_keyframe,keep_fraction,full_depth_pixels,"
-                      "retained_depth_pixels,eligible_seed_points,retained_seed_points\n";
-        stream << frame_index << ',' << cur_frame.image_msg->header.stamp.toNSec() << ','
-               << is_keyframe << ',' << lidar_band_.fraction << ',' << full_lidar_pixels << ','
-               << retained_lidar_pixels << ',' << lidar_points_kept + lidar_points_filtered_fov
-               << ',' << lidar_points_kept << '\n';
-    }
 
     if (use_erp_valid_mask && !diagnosis_dir_.empty())
     {
@@ -721,7 +672,6 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "train_" + formatted_str + ".jpg";
         cam->frame_index_ = frame_index;
-        cam->full_lidar_reference_path_ = full_lidar_reference_path;
 
         cam->setCameraModel(equirectangular_);
         cam->raster_mask_ = raster_mask_;
@@ -1224,34 +1174,6 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
     const int width = static_cast<int>(fused_cpu.size(1));
     cv::Mat fused(height, width, CV_32FC1, fused_cpu.data_ptr<float>());
     cv::Mat rendered(height, width, CV_32FC1, rendered_cpu.data_ptr<float>());
-    if (!camera->full_lidar_reference_path_.empty())
-    {
-        const cv::Mat reference = cv::imread(camera->full_lidar_reference_path_, cv::IMREAD_UNCHANGED);
-        if (reference.type() != CV_32FC1 || reference.size() != rendered.size())
-            throw std::runtime_error("Invalid full LiDAR evaluation reference");
-        size_t count = 0, rendered_count = 0;
-        double sum = 0.0, squared = 0.0;
-        for (int y = 0; y < height; ++y)
-            for (int x = 0; x < width; ++x)
-            {
-                const float gt = reference.at<float>(y, x);
-                if (!(gt > 0.0f) || !std::isfinite(gt)) continue;
-                const float prediction = rendered.at<float>(y, x);
-                if (!std::isfinite(prediction) || prediction < 0.0f)
-                    throw std::runtime_error("Invalid rendered depth at full LiDAR reference");
-                const double error = std::abs(double(prediction) - gt);
-                sum += error;
-                squared += error * error;
-                ++count;
-                rendered_count += prediction > 0.0f;
-            }
-        const std::string path = diagnosis_dir + "/full_lidar_reference_metrics.csv";
-        const bool header = !fs::exists(path);
-        std::ofstream stream(path, std::ios::app);
-        if (header) stream << "image_name,split,reference_pixels,rendered_pixels,mae_m,rmse_m\n";
-        stream << camera->image_name_ << ',' << split << ',' << count << ',' << rendered_count
-               << ',' << sum / count << ',' << std::sqrt(squared / count) << '\n';
-    }
     auto lidar_mask_cpu = camera->lidar_valid_mask_.detach().to(torch::kCPU).contiguous();
     cv::Mat lidar_mask(height, width, CV_8UC1, lidar_mask_cpu.data_ptr<uint8_t>());
     cv::Mat valid_region;
@@ -1825,8 +1747,9 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto Ll1 = use_image_valid_mask
             ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
             : loss_utils::l1_loss(rendered_image, gt_image);
-        auto Ll1_depth = torch::abs(
-            rendered_depth.masked_select(depth_mask) - gt_depth.masked_select(depth_mask)).mean();
+        auto depth_errors = torch::abs(
+            rendered_depth.masked_select(depth_mask) - gt_depth.masked_select(depth_mask));
+        auto Ll1_depth = depth_errors.numel() == 0 ? depth_errors.sum() : depth_errors.mean();
         float lambda_dssim = pc->lambda_dssim_;
         float lambda_depth = pc->lambda_depth_;
         torch::Tensor ssim_value;
