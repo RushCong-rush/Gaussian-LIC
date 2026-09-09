@@ -109,3 +109,9 @@ target_link_libraries(erp_rasterizer_forward_test
                       ${Python3_LIBRARIES}
                       ${FFI_LIB}
                       ${CUDA_LIB_DIR}/libcudart.so)
+
+add_executable(mapping_params_test tests/test_mapping_params.cpp)
+target_link_libraries(mapping_params_test
+                      ${catkin_LIBRARIES}
+                      ${OpenCV_LIBS}
+                      ${YAML_CPP_LIBRARIES})
