@@ -210,6 +210,8 @@ public:
     bool optimize_depth_;
     double lambda_depth_;
     bool iteration_decay_;
+    int optimization_recent_keyframes_;
+    std::vector<uint64_t> optimization_view_counts_;
 
     bool apply_exposure_;
     double exposure_lr_;

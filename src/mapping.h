@@ -118,6 +118,10 @@ public:
         optimize_depth = node["optimize_depth"].as<bool>();
         lambda_depth = node["lambda_depth"].as<double>();
         iteration_decay = node["iteration_decay"].as<bool>();
+        optimization_recent_keyframes = node["optimization_recent_keyframes"]
+            ? node["optimization_recent_keyframes"].as<int>() : 10;
+        if (optimization_recent_keyframes < 0 || optimization_recent_keyframes > 100)
+            throw std::invalid_argument("optimization_recent_keyframes must be between 0 and 100");
 
         apply_exposure = node["apply_exposure"].as<bool>();
         exposure_lr = node["exposure_lr"].as<double>();
@@ -168,6 +172,7 @@ public:
     bool optimize_depth;
     double lambda_depth;
     bool iteration_decay;
+    int optimization_recent_keyframes;
 
     bool apply_exposure;
     double exposure_lr;

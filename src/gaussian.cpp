@@ -17,6 +17,7 @@
  */
 
 #include "gaussian.h"
+#include "keyframe_sampling.h"
 #include "tensor_utils.h"
 #include "loss_utils.h"
 
@@ -770,6 +771,9 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_depth_ = prm.lambda_depth;
     std::cout << "        [Depth Loss Weight] " << lambda_depth_ << std::endl;
     iteration_decay_ = prm.iteration_decay;
+    optimization_recent_keyframes_ = prm.optimization_recent_keyframes;
+    std::cout << "        [Optimization Recent Keyframes] "
+              << optimization_recent_keyframes_ << std::endl;
 
     apply_exposure_ = prm.apply_exposure;
     exposure_lr_ = prm.exposure_lr;
@@ -1733,6 +1737,11 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
                     std::back_inserter(opt_list), max_iters, gen);
     } 
     if (pc->iteration_decay_) decayOptList(max_iters, train_camera_num, dataset, all_list, opt_list, gen);
+    // Apply the recent-view guarantee after the existing budget/decay decision.
+    // Zero keeps the original sampling and RNG sequence unchanged.
+    if (pc->optimization_recent_keyframes_ > 0 && train_camera_num > static_cast<int>(opt_list.size()))
+        opt_list = sampleRecentKeyframes(train_camera_num, static_cast<int>(opt_list.size()),
+                                        pc->optimization_recent_keyframes_, gen);
     std::shuffle(opt_list.begin(), opt_list.end(), gen);
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
@@ -1748,8 +1757,10 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
+    pc->optimization_view_counts_.resize(train_camera_num, 0);
     for (int idx : opt_list)
     {
+        ++pc->optimization_view_counts_[idx];
         pc->t_start_ = std::chrono::steady_clock::now();
         const std::shared_ptr<Camera>& viewpoint_cam = dataset->train_cameras_[idx];
         auto gt_image = viewpoint_cam->original_image_.to(torch::kCUDA, /*non_blocking=*/true);
@@ -1839,6 +1850,13 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     fs::create_directories(gt_dir_path);
     std::string diagnosis_dir_path = result_path + "/depth_diagnose";
     fs::create_directories(diagnosis_dir_path);
+    {
+        std::ofstream counts(diagnosis_dir_path + "/keyframe_optimization_counts.csv");
+        counts << "image_name,optimization_steps\n";
+        for (size_t index = 0; index < dataset->train_cameras_.size(); ++index)
+            counts << dataset->train_cameras_[index]->image_name_ << ','
+                   << pc->optimization_view_counts_.at(index) << '\n';
+    }
     for (const auto& entry : fs::directory_iterator(diagnosis_dir_path))
     {
         const std::string name = entry.path().filename().string();

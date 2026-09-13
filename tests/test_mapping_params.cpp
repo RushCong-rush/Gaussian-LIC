@@ -19,6 +19,22 @@ int main(int argc, char** argv)
         const Params baseline(original);
         require(baseline.lidar_patch_size == 3, path + ": production profile must use LiDAR patch 3");
 
+        require(baseline.optimization_recent_keyframes == 10, path + ": default recent window must be 10");
+        for (int recent : {0, 5, 10, 15, 100})
+        {
+            auto sampling = YAML::Clone(original);
+            sampling["optimization_recent_keyframes"] = recent;
+            require(Params(sampling).optimization_recent_keyframes == recent, "Sampling override ignored");
+        }
+        for (int recent : {-1, 101})
+        {
+            auto sampling = YAML::Clone(original);
+            sampling["optimization_recent_keyframes"] = recent;
+            bool rejected = false;
+            try { Params invalid(sampling); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Invalid recent window accepted");
+        }
         auto config = YAML::Clone(original);
         config.remove("lidar_patch_size");
         require(Params(config).lidar_patch_size == 3, path + ": omitted value must default to 3");
