@@ -18,6 +18,8 @@
 
 #include "mapping.h"
 #include "gaussian.h"
+#include "pose_feedback.h"
+#include <ros/callback_queue.h>
 
 #include <atomic>
 #include <thread>
@@ -50,6 +52,7 @@ std::atomic<double> last_point_time(0.0);
 std::atomic<bool> gaussians_initialized(false);
 std::atomic<bool> online_dap_enabled(false);
 std::atomic<bool> dap_sync_error(false);
+std::atomic<bool> feedback_busy(false);
 std::atomic<double> dap_wait_start(0.0);
 
 namespace
@@ -164,6 +167,7 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
     auto ground_truth = compositeMaskedImage(camera->original_image_, valid_mask, background);
     saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
     saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
+    saveDisplayRender(camera, gaussians, render_dir);
     appendOnlineDepthMetric(camera, std::get<1>(render_pkg), valid_mask, depth_metrics_path);
     if (!diagnosis_dir.empty() && saveDiagnosticImages(camera->frame_index_))
         saveCausalDepthDiagnosis(std::get<1>(render_pkg), std::get<2>(render_pkg),
@@ -327,6 +331,47 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
     dataset->setDiagnosisDirectory(result_path + "/depth_diagnose");
 
+    std::mutex map_mutex;
+    std::condition_variable map_ready;
+    uint32_t completed_frames = 0;
+    ros::CallbackQueue feedback_queue;
+    ros::NodeHandle feedback_node;
+    feedback_node.setCallbackQueue(&feedback_queue);
+    ros::AsyncSpinner feedback_spinner(1, &feedback_queue);
+    std::ofstream feedback_log(result_path + "/pose_feedback.csv");
+    feedback_log << "timestamp_ns,map_frames,optimized,accepted,loss_before,loss_after,wait_s,refine_s,translation_m,rotation_rad\n";
+    boost::function<bool(gaussian_lic::RefinePose::Request&,gaussian_lic::RefinePose::Response&)> refine =
+        [&](gaussian_lic::RefinePose::Request& req, gaussian_lic::RefinePose::Response& res) {
+            feedback_busy = true;
+            const auto start = std::chrono::steady_clock::now();
+            std::unique_lock<std::mutex> lock(map_mutex);
+            map_ready.wait(lock, [&] { return exit_flag || completed_frames >= req.previous_frames; });
+            if (exit_flag) {
+                feedback_busy = false;
+                return false;
+            }
+            res.map_frames = completed_frames;
+            const auto ready = std::chrono::steady_clock::now();
+            refineGaussianPose(req, res, gaussians, dataset, prm);
+            const auto end = std::chrono::steady_clock::now();
+            const auto& a = req.initial_pose;
+            const auto& b = res.pose;
+            const Eigen::Vector3d dt(b.position.x-a.position.x, b.position.y-a.position.y,
+                                    b.position.z-a.position.z);
+            const Eigen::Quaterniond qa(a.orientation.w,a.orientation.x,a.orientation.y,a.orientation.z);
+            const Eigen::Quaterniond qb(b.orientation.w,b.orientation.x,b.orientation.y,b.orientation.z);
+            feedback_log << req.image.header.stamp.toNSec() << ',' << res.map_frames << ','
+                << int(req.optimize) << ',' << int(res.valid) << ',' << res.loss_before << ',' << res.loss_after
+                << ',' << std::chrono::duration<double>(ready-start).count()
+                << ',' << std::chrono::duration<double>(end-ready).count()
+                << ',' << dt.norm() << ',' << qa.angularDistance(qb) << '\n';
+            feedback_log.flush();
+            feedback_busy = false;
+            return true;
+        };
+    auto feedback_service = feedback_node.advertiseService("/gaussian_lic/refine_pose", refine);
+    feedback_spinner.start();
+
     const std::string online_render_dir = result_path + "/online_render";
     const std::string online_gt_dir = result_path + "/online_gt";
     const std::string nonkeyframe_cache_dir = result_path + "/.nonkeyframe_cache";
@@ -338,6 +383,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     if (fs::exists(online_render_dir)) fs::remove_all(online_render_dir);
     if (fs::exists(online_gt_dir)) fs::remove_all(online_gt_dir);
     fs::create_directories(online_render_dir);
+    fs::remove_all(fs::path(result_path) / "display" / "online_render");
     fs::create_directories(online_gt_dir);
     fs::create_directories(depth_diagnosis_dir);
     if (fs::exists(online_depth_metrics_path)) fs::remove(online_depth_metrics_path);
@@ -360,7 +406,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     size_t online_rendered_frames = 0;
 
     Frame cur_frame;
-    while (!exit_flag)
+    while (!exit_flag && ros::ok())
     {
         /// [1] data alignment
         m_buf.lock();
@@ -375,6 +421,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         }
         
         /// [2] add every frame
+        std::unique_lock<std::mutex> map_lock(map_mutex);
         t_start = std::chrono::steady_clock::now();
         dataset->addFrame(cur_frame);
         torch::cuda::synchronize();
@@ -405,6 +452,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                 nonkeyframe_cache_dir + "/" + current_camera->image_name_ + ".pt");
             total_nonkeyframe_cache_write_time += std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - cache_start).count();
+            completed_frames = dataset->all_frame_num_;
+            map_ready.notify_all();
             continue;
         }
 
@@ -445,9 +494,20 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         total_online_render_time +=
             std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
         ++online_rendered_frames;
+        completed_frames = dataset->all_frame_num_;
+        map_ready.notify_all();
     }
 
-    if (dap_sync_error)
+    // Release pending service calls before destroying their captured map and log.
+    {
+        std::lock_guard<std::mutex> lock(map_mutex);
+        exit_flag = true;
+        map_ready.notify_all();
+    }
+    feedback_service.shutdown();
+    feedback_spinner.stop();
+
+    if (dap_sync_error || !ros::ok())
     {
         ros::shutdown();
         return;
@@ -543,11 +603,14 @@ int main(int argc, char** argv)
         while (!exit_flag) 
         {
             double now = ros::WallTime::now().toSec();
-            if (gaussians_initialized && (now - last_point_time > 5.0)) 
+            if (now - last_point_time > 5.0)
             {
                 m_buf.lock();
                 if (point_buf.empty())
-                    exit_flag = true;
+                {
+                    if (gaussians_initialized && !feedback_busy)
+                        exit_flag = true;
+                }
                 else
                 {
                     const double wait_start = dap_wait_start.load();

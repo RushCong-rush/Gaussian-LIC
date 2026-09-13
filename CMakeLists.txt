@@ -22,7 +22,11 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   tf
   eigen_conversions
+  message_generation
 )
+
+add_service_files(FILES RefinePose.srv)
+generate_messages(DEPENDENCIES sensor_msgs geometry_msgs)
 
 find_package(OpenCV 4 REQUIRED)
 find_package(Torch REQUIRED)
@@ -53,6 +57,7 @@ pkg_check_modules(YAML_CPP REQUIRED yaml-cpp>=0.5)
 find_package(Python3 COMPONENTS Interpreter Development NumPy REQUIRED)
 
 catkin_package(
+  CATKIN_DEPENDS message_runtime sensor_msgs geometry_msgs
 #  INCLUDE_DIRS include
 #  LIBRARIES gaussian_lic
 #  CATKIN_DEPENDS roscpp rospy std_msgs
@@ -72,6 +77,7 @@ include_directories(
 
 add_executable(gs_mapping 
               ${PROJECT_SOURCE_DIR}/src/mapping.cpp 
+              ${PROJECT_SOURCE_DIR}/src/pose_feedback.cpp
               ${PROJECT_SOURCE_DIR}/src/gaussian.cpp
               ${PROJECT_SOURCE_DIR}/src/tinyply.cpp
               ${PROJECT_SOURCE_DIR}/src/depth_completer.cpp 
@@ -85,6 +91,7 @@ add_executable(gs_mapping
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/forward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/backward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/rasterizer_impl.cu)
+add_dependencies(gs_mapping ${PROJECT_NAME}_generate_messages_cpp)
 target_link_libraries(gs_mapping 
                       ${catkin_LIBRARIES} 
                       ${OpenCV_LIBS} 

@@ -131,6 +131,27 @@ torch::Tensor compositeMaskedImage(const torch::Tensor& image,
     return image * valid + bg * (1.0f - valid);
 }
 
+void saveDisplayRender(const std::shared_ptr<Camera>& camera,
+                       const std::shared_ptr<GaussianModel>& pc,
+                       const std::string& metric_render_dir)
+{
+    torch::NoGradGuard no_grad;
+    auto white = torch::ones({3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    // A separate pass preserves the existing metric render and the camera masks.
+    auto pkg = render(camera, pc, white, pc->apply_exposure_, false, 1.0f, false);
+    // The rasterizer returns premultiplied foreground RGB without background.
+    auto display = std::get<0>(pkg) + std::get<2>(pkg) * white.view({3, 1, 1});
+    auto rgb = display.detach().clamp(0, 1).to(torch::kCPU)
+        .permute({1, 2, 0}).contiguous().mul(255).to(torch::kUInt8);
+    cv::Mat image(camera->image_height_, camera->image_width_, CV_8UC3, rgb.data_ptr<uint8_t>());
+    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
+    const fs::path metric_dir(metric_render_dir);
+    const auto directory = metric_dir.parent_path() / "display" / metric_dir.filename();
+    fs::create_directories(directory);
+    if (!cv::imwrite((directory / camera->image_name_).string(), image))
+        throw std::runtime_error("Cannot save display render: " + camera->image_name_);
+}
+
 struct PixelPosition 
 {
     int u, v;
@@ -1809,6 +1830,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     std::string render_dir_path = result_path + "/render";
     if (fs::exists(render_dir_path)) fs::remove_all(render_dir_path);
     fs::create_directories(render_dir_path);
+    fs::remove_all(fs::path(result_path) / "display" / "render");
     std::string render_depth_dir_path = result_path + "/render_depth";
     if (fs::exists(render_depth_dir_path)) fs::remove_all(render_depth_dir_path);
     fs::create_directories(render_depth_dir_path);
@@ -1895,6 +1917,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
             cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
             cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
+            saveDisplayRender(train_camera, pc, render_dir_path);
 
             torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
@@ -1983,6 +2006,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
             cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
             cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
+            saveDisplayRender(test_camera, pc, render_dir_path);
 
             torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
             b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);

@@ -1,0 +1,10 @@
+sensor_msgs/Image image
+geometry_msgs/Pose initial_pose
+uint32 previous_frames
+bool optimize
+---
+bool valid
+geometry_msgs/Pose pose
+uint32 map_frames
+float64 loss_before
+float64 loss_after

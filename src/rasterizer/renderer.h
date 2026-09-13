@@ -33,4 +33,5 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
        torch::Tensor& bg_color,
        bool use_trained_exposure = false,
        bool no_color = false,
-       float scaling_modifier = 1.0);
+       float scaling_modifier = 1.0,
+       bool apply_valid_mask = true);

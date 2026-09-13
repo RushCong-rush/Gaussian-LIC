@@ -262,3 +262,8 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
 torch::Tensor compositeMaskedImage(const torch::Tensor& image,
                                    const torch::Tensor& valid_mask,
                                    const torch::Tensor& background);
+
+// Export-only rendering; training and metric images keep their original masks/background.
+void saveDisplayRender(const std::shared_ptr<Camera>& camera,
+                       const std::shared_ptr<GaussianModel>& pc,
+                       const std::string& metric_render_dir);

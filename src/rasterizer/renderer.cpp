@@ -24,7 +24,8 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
        torch::Tensor& bg_color,
        bool use_trained_exposure,
        bool no_color,
-       float scaling_modifier)
+       float scaling_modifier,
+       bool apply_valid_mask)
 {
     auto screenspace_points = torch::zeros_like(pc->getXYZ(), torch::TensorOptions().dtype(pc->getXYZ().dtype()).requires_grad(true).device(torch::kCUDA));
 
@@ -53,8 +54,9 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
         pc->lambda_erank_,
         viewpoint_camera->is_equirectangular_
     );
-    raster_settings.valid_mask_ = no_color
-        ? viewpoint_camera->extension_raster_mask_ : viewpoint_camera->raster_mask_;
+    if (apply_valid_mask)
+        raster_settings.valid_mask_ = no_color
+            ? viewpoint_camera->extension_raster_mask_ : viewpoint_camera->raster_mask_;
     GaussianRasterizer rasterizer(raster_settings);
 
     auto means3D = pc->getXYZ();  // (n, 3)
