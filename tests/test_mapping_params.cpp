@@ -19,8 +19,8 @@ int main(int argc, char** argv)
         const Params baseline(original);
         require(baseline.lidar_patch_size == 3, path + ": production profile must use LiDAR patch 3");
 
-        require(baseline.optimization_recent_keyframes == 10, path + ": default recent window must be 10");
-        for (int recent : {0, 5, 10, 15, 100})
+        require(baseline.optimization_recent_keyframes == 15, path + ": default recent window must be 15");
+        for (int recent : {0, 5, 10, 15, 20, 30, 100})
         {
             auto sampling = YAML::Clone(original);
             sampling["optimization_recent_keyframes"] = recent;
