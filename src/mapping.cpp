@@ -168,6 +168,8 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
     saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
     saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
     saveDisplayRender(camera, gaussians, render_dir);
+    saveVisibilityDiagnosis(camera, gaussians, background,
+                            fs::path(depth_metrics_path).parent_path().string(), "online");
     appendOnlineDepthMetric(camera, std::get<1>(render_pkg), valid_mask, depth_metrics_path);
     if (!diagnosis_dir.empty() && saveDiagnosticImages(camera->frame_index_))
         saveCausalDepthDiagnosis(std::get<1>(render_pkg), std::get<2>(render_pkg),

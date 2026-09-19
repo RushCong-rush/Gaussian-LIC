@@ -17,6 +17,8 @@ int main(int argc, char** argv)
         const std::string path = file.path().string();
         const YAML::Node original = YAML::LoadFile(path);
         const Params baseline(original);
+        require(baseline.normalize_depth_gradient, "Normalized depth gradients must default to enabled");
+        require(baseline.dap_depth_loss_relative_weight == 0.1, "Default DAP relative weight changed");
         require(baseline.lidar_patch_size == 3, path + ": production profile must use LiDAR patch 3");
 
         require(baseline.optimization_recent_keyframes == 15, path + ": default recent window must be 15");

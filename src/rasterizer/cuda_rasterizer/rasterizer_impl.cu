@@ -494,7 +494,7 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 	float* out_depth,
 	int* radii,
 	bool debug, bool no_color, bool equirectangular, bool save_backward,
-	const bool* valid_mask)
+	const bool* valid_mask, const float* depth_visibility, float* visibility_weights)
 {
 	if (NUM_CHAFFELS != 3 && colors_precomp == nullptr) 
 	{ 
@@ -643,7 +643,7 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		imgState.max_contrib,
 		background,
-		out_color, out_final_T, out_depth, no_color, equirectangular, save_backward, valid_mask), debug)
+		out_color, out_final_T, out_depth, no_color, equirectangular, save_backward, valid_mask, depth_visibility, visibility_weights), debug)
 
 	if (save_backward)
 	{
@@ -695,7 +695,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_ddepth,
 	const float lambda_erank,
 	bool debug,
-	bool equirectangular)
+	bool equirectangular, const float* depth_visibility)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -736,7 +736,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dopacity,
 			dL_dcolor,
 		    dL_ddepth,
-			equirectangular), debug)
+			equirectangular, depth_visibility), debug)
 
 	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
 	CHECK_CUDA(BACKWARD::preprocess(P, D, M, width, height,

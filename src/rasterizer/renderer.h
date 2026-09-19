@@ -34,4 +34,9 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
        bool use_trained_exposure = false,
        bool no_color = false,
        float scaling_modifier = 1.0,
-       bool apply_valid_mask = true);
+       bool apply_valid_mask = true,
+       bool training_visibility = false, torch::Tensor* visibility_weights = nullptr);
+
+void saveVisibilityDiagnosis(const std::shared_ptr<Camera>& camera,
+    std::shared_ptr<GaussianModel> pc, torch::Tensor& background,
+    const std::string& directory, const std::string& phase);

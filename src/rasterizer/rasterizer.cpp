@@ -60,7 +60,9 @@ GaussianRasterizerFunction::forward(
         raster_settings.no_color_,
         raster_settings.equirectangular_,
         raster_settings.save_backward_,
-        raster_settings.valid_mask_
+        raster_settings.valid_mask_,
+        raster_settings.depth_visibility_,
+        raster_settings.visibility_weights_
     );
     auto num_rendered = std::get<0>(rasterization_result);
     auto num_buckets = std::get<1>(rasterization_result);
@@ -85,6 +87,7 @@ GaussianRasterizerFunction::forward(
     ctx->saved_data["limy_pos"] = raster_settings.limy_pos_;
     ctx->saved_data["lambda_erank"] = raster_settings.lambda_erank_;
     ctx->saved_data["equirectangular"] = raster_settings.equirectangular_;
+    ctx->saved_data["normalize_depth_gradient"] = raster_settings.normalize_depth_gradient_;
     ctx->save_for_backward({raster_settings.bg_,
                             raster_settings.viewmatrix_,
                             raster_settings.projmatrix_,
@@ -100,7 +103,7 @@ GaussianRasterizerFunction::forward(
                             geomBuffer,
                             binningBuffer,
                             imgBuffer,
-                            sampleBuffer});
+                            sampleBuffer, final_T, raster_settings.depth_visibility_});
     return {color, radii, depth, final_T};
 }
 
@@ -142,6 +145,8 @@ GaussianRasterizerFunction::backward(
     auto dL_dcolor = grad_outputs[0];
     // auto dL_dradii = grad_outputs[1];
     auto dL_ddepth = grad_outputs[2];
+    if (ctx->saved_data["normalize_depth_gradient"].toBool())
+        dL_ddepth = dL_ddepth / (1.0f - saved[16]).clamp_min(1.0e-6f);
     // auto dL_dfinal_T = grad_outputs[3];
     auto rasterization_backward_result = RasterizeGaussiansBackwardCUDA(
         bg,
@@ -174,7 +179,7 @@ GaussianRasterizerFunction::backward(
         sampleBuffer,
         lambda_erank,
         false,
-        equirectangular
+        equirectangular, saved[17]
     );
 
     return {

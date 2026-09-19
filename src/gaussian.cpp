@@ -20,6 +20,7 @@
 #include "keyframe_sampling.h"
 #include "tensor_utils.h"
 #include "loss_utils.h"
+#include "depth_loss.h"
 
 #include <tf/tf.h>
 #include <tf/transform_broadcaster.h>
@@ -694,6 +695,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "train_" + formatted_str + ".jpg";
         cam->frame_index_ = frame_index;
+        cam->has_dap_depth_ = has_dap_fusion;
 
         cam->setCameraModel(equirectangular_);
         cam->raster_mask_ = raster_mask_;
@@ -722,6 +724,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "test_" + formatted_str + ".jpg";
         cam->frame_index_ = frame_index;
+        cam->has_dap_depth_ = has_dap_fusion;
 
         cam->setCameraModel(equirectangular_);
         cam->raster_mask_ = raster_mask_;
@@ -760,6 +763,12 @@ GaussianModel::GaussianModel(const Params& prm)
     scaling_scale_ = prm.scaling_scale;
     map_extension_min_depth_gap_m_ = prm.map_extension_min_depth_gap_m;
     map_extension_relative_depth_gap_ = prm.map_extension_relative_depth_gap;
+    map_extension_depth_rescued_opacity_ = prm.map_extension_depth_rescued_opacity;
+    map_extension_depth_rescued_scale_multiplier_ = prm.map_extension_depth_rescued_scale_multiplier;
+    std::cout << "        [Depth-Rescued Initial Scale Multiplier] "
+              << map_extension_depth_rescued_scale_multiplier_ << std::endl;
+    std::cout << "        [Depth-Rescued Initial Opacity] "
+              << map_extension_depth_rescued_opacity_ << std::endl;
 
     position_lr_ = prm.position_lr;
     feature_lr_ = prm.feature_lr;
@@ -768,6 +777,13 @@ GaussianModel::GaussianModel(const Params& prm)
     rotation_lr_ = prm.rotation_lr;
     lambda_dssim_ = prm.lambda_dssim;
     optimize_depth_ = prm.optimize_depth;
+    normalize_depth_gradient_ = prm.normalize_depth_gradient;
+    diagnose_depth_visibility_ = prm.diagnose_depth_visibility;
+    depth_visibility_lidar_strength_ = prm.depth_visibility_lidar_strength;
+    depth_visibility_dap_strength_ = prm.depth_visibility_dap_strength;
+    dap_depth_loss_relative_weight_ = prm.dap_depth_loss_relative_weight;
+    std::cout << "        [Normalized Depth Gradient] " << normalize_depth_gradient_ << std::endl;
+    std::cout << "        [DAP Relative Depth Weight] " << dap_depth_loss_relative_weight_ << std::endl;
     lambda_depth_ = prm.lambda_depth;
     std::cout << "        [Depth Loss Weight] " << lambda_depth_ << std::endl;
     iteration_decay_ = prm.iteration_decay;
@@ -1684,6 +1700,32 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     rots.index({torch::indexing::Slice(), 0}) = 1;
     torch::Tensor opacities = general_utils::inverse_sigmoid(0.1f * torch::ones({num, 1}, torch::kFloat32).cuda());  // (n, 1)
 
+    // Keep the ordinary path at 0.1; label after pixel selection and patch sampling.
+    const auto accepted_depth_rescued = depth_rescued.index({valid_flag});
+    if (pc->map_extension_depth_rescued_scale_multiplier_ != 1.0)
+    {
+        // Stored scales are logarithms; multiply all three linear axes equally.
+        scales.index_put_({accepted_depth_rescued},
+            scales.index({accepted_depth_rescued}) +
+            std::log(pc->map_extension_depth_rescued_scale_multiplier_));
+    }
+    if (pc->map_extension_depth_rescued_opacity_ != 0.1)
+    {
+        const float value = static_cast<float>(pc->map_extension_depth_rescued_opacity_);
+        opacities.index_put_({accepted_depth_rescued}, std::log(value / (1.0f - value)));
+    }
+    if (!dataset->diagnosis_dir_.empty())
+    {
+        const std::string path = dataset->diagnosis_dir_ + "/extension_opacity_metrics.csv";
+        const bool write_header = !fs::exists(path);
+        std::ofstream stream(path, std::ios::app);
+        if (write_header)
+            stream << "frame_index,inserted_gaussians,depth_rescued_gaussians,ordinary_initial_opacity,depth_rescued_initial_opacity,depth_rescued_scale_multiplier\n";
+        stream << dataset->all_frame_num_ - 1 << ',' << num << ','
+               << accepted_depth_rescued.sum().item<int64_t>() << ",0.1,"
+               << pc->map_extension_depth_rescued_opacity_ << ','
+               << pc->map_extension_depth_rescued_scale_multiplier_ << '\n';
+    }
     pc->densificationPostfix(fused_point_cloud, features_dc, features_rest, opacities, scales, rots);
 
     std::cout << std::fixed << std::setprecision(2) 
@@ -1769,7 +1811,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
         pc->t_start_ = std::chrono::steady_clock::now();
-        auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_);
+        auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_, false, 1.0f, true, true);
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
         const bool use_image_valid_mask =
@@ -1779,9 +1821,32 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto Ll1 = use_image_valid_mask
             ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
             : loss_utils::l1_loss(rendered_image, gt_image);
-        auto depth_errors = torch::abs(
-            rendered_depth.masked_select(depth_mask) - gt_depth.masked_select(depth_mask));
-        auto Ll1_depth = depth_errors.numel() == 0 ? depth_errors.sum() : depth_errors.mean();
+        torch::Tensor Ll1_depth;
+        if (viewpoint_cam->has_dap_depth_ && dataset->dap_dense_depth_supervision_)
+        {
+            auto lidar_mask = viewpoint_cam->lidar_valid_mask_.to(torch::kCUDA).to(torch::kBool).squeeze();
+            Ll1_depth = loss_utils::sourceBalancedDepthL1(rendered_depth, gt_depth, lidar_mask,
+                                                         depth_mask, pc->dap_depth_loss_relative_weight_);
+        }
+        else
+            Ll1_depth = loss_utils::maskedDepthL1(rendered_depth, gt_depth, depth_mask);
+        // Record each keyframe once; logging does not select or modify observations.
+        if (pc->diagnose_depth_visibility_ && pc->optimization_view_counts_[idx] == 1 &&
+            viewpoint_cam->has_dap_depth_)
+        {
+            auto lidar_mask = viewpoint_cam->lidar_valid_mask_.to(torch::kCUDA).to(torch::kBool).squeeze();
+            const std::string path = dataset->diagnosis_dir_ + "/depth_supervision_metrics.csv";
+            const bool header = !fs::exists(path);
+            std::ofstream csv(path, std::ios::app);
+            if (header) csv << "image_name,lidar_pixels,dap_pixels,dap_relative_weight,lidar_l1_m,dap_l1_m\n";
+            auto lm = depth_mask & lidar_mask;
+            auto dm = depth_mask & ~lidar_mask;
+            csv << viewpoint_cam->image_name_ << ',' << lm.sum().item<int64_t>() << ','
+                << dm.sum().item<int64_t>() << ','
+                << (dataset->dap_dense_depth_supervision_ ? pc->dap_depth_loss_relative_weight_ : 0.) << ','
+                << loss_utils::maskedDepthL1(rendered_depth, gt_depth, lm).item<double>() << ','
+                << loss_utils::maskedDepthL1(rendered_depth, gt_depth, dm).item<double>() << '\n';
+        }
         float lambda_dssim = pc->lambda_dssim_;
         float lambda_depth = pc->lambda_depth_;
         torch::Tensor ssim_value;
@@ -1890,6 +1955,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
         double lpipss = 0;
         for (const auto& train_camera : dataset->train_cameras_)
         {
+            saveVisibilityDiagnosis(train_camera, pc, bg, diagnosis_dir_path, "final");
             auto render_pkg = render(train_camera, pc, bg, pc->apply_exposure_);
             auto rendered_image = std::get<0>(render_pkg).clamp(0, 1);
             auto rendered_depth = std::get<1>(render_pkg);

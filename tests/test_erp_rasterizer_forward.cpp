@@ -8,6 +8,7 @@
 #include <torch/torch.h>
 
 #include "rasterizer/rasterizer.h"
+#include "depth_loss.h"
 
 namespace
 {
@@ -427,6 +428,87 @@ void checkIrregularMask(const int height = kHeight, const int width = kWidth)
     }
 }
 
+void checkSourceBalancedDepthLoss()
+{
+    torch::AutoGradMode enable_grad(true);
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto reference = torch::full({4}, 2.f, options);
+    auto lidar = torch::tensor({true,false,false,false}, options.dtype(torch::kBool));
+    auto valid = torch::tensor({true,true,true,false}, options.dtype(torch::kBool));
+    auto rendered = torch::tensor({3.f,4.f,9.f,99.f}, options).set_requires_grad(true);
+    auto loss = loss_utils::sourceBalancedDepthL1(rendered, reference, lidar, valid, .1);
+    loss.backward();
+    require(std::abs(loss.item<double>() - 1.45) < 1e-6, "Source-balanced depth loss value incorrect");
+    require(torch::allclose(rendered.grad(),torch::tensor({1.f,.05f,.05f,0.f}, options)),
+            "LiDAR or DAP depth gradients are incorrect");
+    auto repeated = torch::cat({rendered.detach().slice(0,0,1), rendered.detach().slice(0,1,3).repeat({10})}).set_requires_grad(true);
+    auto repeated_lidar = torch::zeros({21},options.dtype(torch::kBool));
+    repeated_lidar.index_put_({0},true);
+    auto repeated_loss = loss_utils::sourceBalancedDepthL1(repeated,torch::full_like(repeated,2.f),
+        repeated_lidar,torch::ones_like(repeated_lidar),.1);
+    repeated_loss.backward();
+    require(std::abs(repeated_loss.item<double>()-1.45)<1e-6 &&
+            std::abs(repeated.grad()[0].item<double>()-1.)<1e-6,
+            "More DAP pixels diluted LiDAR supervision");
+    require(std::abs(loss_utils::sourceBalancedDepthL1(rendered,reference,lidar,valid,0.).item<double>()-1.)<1e-6,
+            "Zero DAP weight does not preserve LiDAR loss");
+    require(std::abs(loss_utils::sourceBalancedDepthL1(rendered,reference,lidar,lidar,.1).item<double>()-1.)<1e-6,
+            "Empty DAP region changes LiDAR loss");
+    std::cout << "Source-balanced depth loss values, gradients and density invariance passed\n";
+}
+
+void checkDepthVisibilityGradients()
+{
+    torch::AutoGradMode enable_grad(true);
+    auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto bg = torch::zeros({3}, opts), eye = torch::eye(4, opts), pos = torch::zeros({3}, opts);
+    auto xyz0 = torch::tensor({0.f,0.f,2.f, 0.f,0.f,3.f}, opts).reshape({2,3});
+    auto opacity0 = torch::tensor({.1f,.2f}, opts).reshape({2,1});
+    auto scale = torch::full({2,3}, .3f, opts);
+    auto rot = torch::tensor({1.f,0.f,0.f,0.f}, opts).repeat({2,1});
+    auto dc = torch::tensor({.2f,.1f,.3f, -.1f,.3f,.2f}, opts).reshape({2,1,3});
+    auto empty = torch::empty({0}, opts);
+    auto sh = torch::zeros({2,15,3}, opts);
+    for (int mode = 0; mode < 4; ++mode)
+    {
+        GaussianRasterizationSettings settings(64,128,1,1,-1,1,-1,1,bg,1,eye,eye,0,pos,false,true,false,0,true);
+        settings.normalize_depth_gradient_ = mode != 0;
+        if (mode >= 2)
+            settings.depth_visibility_ = torch::stack({torch::full({64,128}, 2.f, opts),
+                torch::full({64,128}, .25f, opts), torch::full({64,128}, .8f, opts)});
+        GaussianRasterizer raster(settings);
+        auto loss = [&](torch::Tensor xyz, torch::Tensor opacity) {
+            auto r = raster.forward(xyz, torch::zeros_like(xyz), opacity, dc, sh, empty, scale, rot, empty);
+            if (mode == 3) return std::get<0>(r).index({0,32,64});
+            return std::get<2>(r).index({32,64});
+        };
+        auto xyz = xyz0.clone().set_requires_grad(true);
+        auto opacity = opacity0.clone().set_requires_grad(true);
+        loss(xyz, opacity).backward();
+        for (int variable = 0; variable < 2; ++variable)
+        for (int i = 0; i < 2; ++i)
+        {
+            torch::NoGradGuard guard;
+            auto plus = variable ? xyz0.clone() : opacity0.clone();
+            auto minus = plus.clone();
+            const int axis = variable ? 2 : 0;
+            const float eps = .0002f;
+            plus.index_put_({i,axis}, plus.index({i,axis}).item<float>() + eps);
+            minus.index_put_({i,axis}, minus.index({i,axis}).item<float>() - eps);
+            const double numeric = ((variable ? loss(plus,opacity0) : loss(xyz0,plus)).item<double>() -
+                                    (variable ? loss(minus,opacity0) : loss(xyz0,minus)).item<double>()) / (2*eps);
+            const double analytic = (variable ? xyz.grad() : opacity.grad()).index({i,axis}).item<double>();
+            std::cout << "depth_visibility mode=" << mode << " variable=" << variable << " point=" << i
+                      << " analytic=" << analytic << " numeric=" << numeric << '\n';
+            if (mode != 0)
+                require(std::isfinite(analytic) && std::abs(analytic-numeric) < .004 + .025*std::abs(numeric),
+                        "Normalized depth / visibility gradient differs from CUDA finite difference");
+            else if (!variable && i == 0)
+                require(std::abs(analytic-numeric) > .1, "Legacy normalization mismatch was not reproduced");
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     torch::NoGradGuard no_grad;
@@ -484,6 +566,8 @@ int main(int argc, char** argv)
     require(std::abs(pinhole.depth.index({kHeight / 2, kWidth / 2}).item<float>() - 4.0f) < 1.0e-3f,
             "pinhole z-depth regressed");
 
+    checkSourceBalancedDepthLoss();
+    checkDepthVisibilityGradients();
     checkErpGradients();
     checkMixedSeamTileCounts();
     checkInferenceCache();

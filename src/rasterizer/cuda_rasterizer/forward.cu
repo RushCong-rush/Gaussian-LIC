@@ -413,7 +413,8 @@ renderCUDA(
 	float* __restrict__ out_depth,
 	bool no_color,
 	bool equirectangular,
-	const bool* __restrict__ valid_mask)
+	const bool* __restrict__ valid_mask,
+    const float* __restrict__ depth_visibility, float* __restrict__ visibility_weights)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -517,7 +518,8 @@ renderCUDA(
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
 			// Avoid numerical instabilities (see paper appendix). 
-			float alpha = min(0.99f, con_o.w * exp(power));
+			const float gate = depthVisibilityGate(depth_visibility, pix_id, W * H, collected_depth[j]);
+			float alpha = min(0.99f, con_o.w * exp(power) * gate);
 			if (alpha < 1.0f / 255.0f) { continue; }
 			float test_T = T * (1 - alpha);
 			if (test_T < 0.0001f) 
@@ -532,6 +534,13 @@ renderCUDA(
 					for (int ch = 0; ch < CHANNELS; ch++)
 						C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 				}
+				if (visibility_weights && depth_visibility && depth_visibility[pix_id] > 0.f)
+                {
+                    const float delta = collected_depth[j] - depth_visibility[pix_id];
+                    const float margin = depth_visibility[W * H + pix_id];
+                    const int band = delta < -margin ? 0 : (delta > margin ? 2 : 1);
+                    visibility_weights[band * W * H + pix_id] += alpha * T;
+                }
 				depth_render += collected_depth[j] * alpha * T;
 				contributor_real++;
 
@@ -586,7 +595,7 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	bool no_color,
 	bool equirectangular,
 	bool save_backward,
-	const bool* valid_mask)
+	const bool* valid_mask, const float* depth_visibility, float* visibility_weights)
 {
 	// Keep the training kernel free of runtime inference-cache branches.
 	auto launch = [&](auto inference)
@@ -609,7 +618,7 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 			out_depth,
 			no_color,
 			equirectangular,
-			valid_mask);
+			valid_mask, depth_visibility, visibility_weights);
 	};
 	if (save_backward) launch(std::false_type{});
 	else launch(std::true_type{});

@@ -75,6 +75,9 @@ struct GaussianRasterizationSettings
     bool equirectangular_;
     bool save_backward_ = true;
     torch::Tensor valid_mask_;
+    bool normalize_depth_gradient_ = true;
+    torch::Tensor depth_visibility_;  // 3 x H x W: observed depth, margin, strength
+    torch::Tensor visibility_weights_;  // Optional diagnostic output, front / near / behind
 };
 
 class GaussianRasterizerFunction : public torch::autograd::Function<GaussianRasterizerFunction>

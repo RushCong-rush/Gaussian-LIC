@@ -200,6 +200,8 @@ public:
     double scaling_scale_;
     double map_extension_min_depth_gap_m_;
     double map_extension_relative_depth_gap_;
+    double map_extension_depth_rescued_opacity_;
+    double map_extension_depth_rescued_scale_multiplier_;
 
     double position_lr_;
     double feature_lr_;
@@ -208,6 +210,11 @@ public:
     double rotation_lr_;
     double lambda_dssim_;
     bool optimize_depth_;
+    bool normalize_depth_gradient_;
+    bool diagnose_depth_visibility_;
+    double depth_visibility_lidar_strength_;
+    double depth_visibility_dap_strength_;
+    double dap_depth_loss_relative_weight_;
     double lambda_depth_;
     bool iteration_decay_;
     int optimization_recent_keyframes_;

@@ -21,6 +21,7 @@
 #include "yaml_utils.h"
 
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <queue>
 #include <iostream>
@@ -86,6 +87,15 @@ public:
             ? node["map_extension_relative_depth_gap"].as<double>() : 0.1;
         if (map_extension_relative_depth_gap < 0.0)
             throw std::invalid_argument("map_extension_relative_depth_gap must be nonnegative");
+        map_extension_depth_rescued_opacity = node["map_extension_depth_rescued_opacity"]
+            ? node["map_extension_depth_rescued_opacity"].as<double>() : 0.1;
+        if (!(map_extension_depth_rescued_opacity > 0.0 && map_extension_depth_rescued_opacity < 1.0))
+            throw std::invalid_argument("map_extension_depth_rescued_opacity must be between 0 and 1 exclusively");
+        map_extension_depth_rescued_scale_multiplier = node["map_extension_depth_rescued_scale_multiplier"]
+            ? node["map_extension_depth_rescued_scale_multiplier"].as<double>() : 1.0;
+        if (!(map_extension_depth_rescued_scale_multiplier > 0.0) ||
+            !std::isfinite(map_extension_depth_rescued_scale_multiplier))
+            throw std::invalid_argument("map_extension_depth_rescued_scale_multiplier must be finite and positive");
         online_dap = node["online_dap"] ? node["online_dap"].as<bool>() : false;
         dap_topic = node["dap_topic"] ? node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
         dap_dense_depth_supervision = node["dap_dense_depth_supervision"]
@@ -116,6 +126,17 @@ public:
         rotation_lr = node["rotation_lr"].as<double>();
         lambda_dssim = node["lambda_dssim"].as<double>();
         optimize_depth = node["optimize_depth"].as<bool>();
+        normalize_depth_gradient = node["normalize_depth_gradient"] ? node["normalize_depth_gradient"].as<bool>() : true;
+        diagnose_depth_visibility = node["diagnose_depth_visibility"] ? node["diagnose_depth_visibility"].as<bool>() : false;
+        depth_visibility_lidar_strength = node["depth_visibility_lidar_strength"] ? node["depth_visibility_lidar_strength"].as<double>() : 0.0;
+        depth_visibility_dap_strength = node["depth_visibility_dap_strength"] ? node["depth_visibility_dap_strength"].as<double>() : 0.0;
+        if (!(depth_visibility_lidar_strength >= 0.0 && depth_visibility_lidar_strength <= 1.0 &&
+              depth_visibility_dap_strength >= 0.0 && depth_visibility_dap_strength <= 1.0))
+            throw std::invalid_argument("Depth visibility strengths must lie in [0, 1]");
+        dap_depth_loss_relative_weight = node["dap_depth_loss_relative_weight"]
+            ? node["dap_depth_loss_relative_weight"].as<double>() : 0.1;
+        if (!(dap_depth_loss_relative_weight >= 0.0) || !std::isfinite(dap_depth_loss_relative_weight))
+            throw std::invalid_argument("dap_depth_loss_relative_weight must be finite and nonnegative");
         lambda_depth = node["lambda_depth"].as<double>();
         iteration_decay = node["iteration_decay"].as<bool>();
         optimization_recent_keyframes = node["optimization_recent_keyframes"]
@@ -146,6 +167,8 @@ public:
     double max_depth;
     double map_extension_min_depth_gap_m;
     double map_extension_relative_depth_gap;
+    double map_extension_depth_rescued_opacity;
+    double map_extension_depth_rescued_scale_multiplier;
     bool online_dap;
     std::string dap_topic;
     bool dap_dense_depth_supervision;
@@ -170,6 +193,11 @@ public:
     double rotation_lr;
     double lambda_dssim;
     bool optimize_depth;
+    bool normalize_depth_gradient;
+    bool diagnose_depth_visibility;
+    double depth_visibility_lidar_strength;
+    double depth_visibility_dap_strength;
+    double dap_depth_loss_relative_weight;
     double lambda_depth;
     bool iteration_decay;
     int optimization_recent_keyframes;

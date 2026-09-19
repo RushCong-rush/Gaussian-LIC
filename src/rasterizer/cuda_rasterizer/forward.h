@@ -134,7 +134,7 @@ namespace FORWARD
 		bool no_color,
 		bool equirectangular,
 		bool save_backward,
-		const bool* valid_mask);
+		const bool* valid_mask, const float* depth_visibility, float* visibility_weights);
 }
 
 

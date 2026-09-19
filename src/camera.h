@@ -149,6 +149,7 @@ public:
     int image_width_;              
     int image_height_;
     torch::Tensor original_image_;
+    bool has_dap_depth_ = false;
     torch::Tensor original_depth_;
     torch::Tensor diagnostic_depth_;
     torch::Tensor lidar_valid_mask_;

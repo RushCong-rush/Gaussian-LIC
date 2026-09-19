@@ -51,7 +51,7 @@ namespace BACKWARD
 		float* dL_dopacity,
 		float* dL_dcolors,
 	    float* dL_ddepth,
-		bool equirectangular);
+		bool equirectangular, const float* depth_visibility);
 
 	void preprocess(
 		int P, int D, int M,

@@ -569,7 +569,7 @@ PerGaussianRenderCUDA(
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
 	float* __restrict__ dL_ddepth,
-	bool equirectangular)
+	bool equirectangular, const float* depth_visibility)
 {
 	// global_bucket_idx = warp_idx
 	auto block = cg::this_thread_block();
@@ -732,7 +732,10 @@ PerGaussianRenderCUDA(
 				d.x = periodicPixelDifference(d.x, W);
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f) continue;
-			const float G = exp(power);
+			float gate_derivative = 0.f;
+            const float gate = depthVisibilityGate(depth_visibility, pix_id, W * H, depth, &gate_derivative);
+            const float base_G = exp(power);
+			const float G = base_G * gate;
 			const float alpha = min(0.99f, con_o.w * G);
 			if (alpha < 1.0f / 255.0f) continue;
 
@@ -757,6 +760,7 @@ PerGaussianRenderCUDA(
 
 
 			// Helpful reusable temporary variables
+            Register_dL_ddepth += con_o.w * base_G * gate_derivative * dL_dalpha;
 			const float dL_dG = con_o.w * dL_dalpha;
 			const float gdx = G * d.x;
 			const float gdy = G * d.y;
@@ -910,7 +914,7 @@ void BACKWARD::render(
 	float* dL_dopacity,
 	float* dL_dcolors,
 	    float* dL_ddepth,
-	bool equirectangular)
+	bool equirectangular, const float* depth_visibility)
 {
 	const int THREADS = 32;
 	PerGaussianRenderCUDA<NUM_CHAFFELS> <<<((B*32) + THREADS - 1), THREADS>>>(
@@ -938,6 +942,6 @@ void BACKWARD::render(
 			dL_dopacity,
 			dL_dcolors,
 			dL_ddepth,
-			equirectangular
+			equirectangular, depth_visibility
 			);
 }

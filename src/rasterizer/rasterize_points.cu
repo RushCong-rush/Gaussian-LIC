@@ -74,7 +74,9 @@ RasterizeGaussiansCUDA(
     const bool prefiltered,
     const bool debug, const bool no_color, const bool equirectangular,
     const bool save_backward,
-    const torch::Tensor& valid_mask)
+    const torch::Tensor& valid_mask,
+    const torch::Tensor& depth_visibility,
+    const torch::Tensor& visibility_weights)
 {
     if (means3D.ndimension() != 2 || means3D.size(1) != 3) 
     { 
@@ -92,6 +94,11 @@ RasterizeGaussiansCUDA(
                     valid_mask.dim() == 2 && valid_mask.size(0) == H && valid_mask.size(1) == W,
                     "valid_mask must be a contiguous H x W bool tensor on the Gaussian device");
     }
+    for (const auto& tensor : {depth_visibility, visibility_weights})
+        if (tensor.defined())
+            TORCH_CHECK(tensor.device() == means3D.device() && tensor.scalar_type() == torch::kFloat32 &&
+                        tensor.is_contiguous() && tensor.dim() == 3 && tensor.size(0) == 3 &&
+                        tensor.size(1) == H && tensor.size(2) == W, "Visibility tensor must be contiguous CUDA float32 3 x H x W");
     int M = 0;
     if(sh.size(0) != 0) 
     { 
@@ -152,7 +159,9 @@ RasterizeGaussiansCUDA(
             out_depth.contiguous().data<float>(),
             radii.contiguous().data<int>(),
             debug, no_color, equirectangular, save_backward,
-            has_mask ? valid_mask.data_ptr<bool>() : nullptr);
+            has_mask ? valid_mask.data_ptr<bool>() : nullptr,
+            depth_visibility.defined() ? depth_visibility.data_ptr<float>() : nullptr,
+            visibility_weights.defined() ? visibility_weights.data_ptr<float>() : nullptr);
             
         rendered = std::get<0>(tup);
         num_buckets = std::get<1>(tup);
@@ -193,11 +202,17 @@ RasterizeGaussiansBackwardCUDA(
     const torch::Tensor& sampleBuffer,
     const float lambda_erank,
     const bool debug,
-    const bool equirectangular)
+    const bool equirectangular,
+    const torch::Tensor& depth_visibility)
 {
     const int P = means3D.size(0);
     const int H = dL_dout_color.size(1);
     const int W = dL_dout_color.size(2);
+    for (const auto& tensor : {depth_visibility})
+        if (tensor.defined())
+            TORCH_CHECK(tensor.device() == means3D.device() && tensor.scalar_type() == torch::kFloat32 &&
+                        tensor.is_contiguous() && tensor.dim() == 3 && tensor.size(0) == 3 &&
+                        tensor.size(1) == H && tensor.size(2) == W, "Visibility tensor must be contiguous CUDA float32 3 x H x W");
     int M = 0;
     if(sh.size(0) != 0) 
     {	
@@ -258,7 +273,7 @@ RasterizeGaussiansBackwardCUDA(
             dL_ddepth.contiguous().data<float>(),
             lambda_erank,
             debug,
-            equirectangular);
+            equirectangular, depth_visibility.defined() ? depth_visibility.data_ptr<float>() : nullptr);
     }
 
     return std::make_tuple(dL_dmeans2D, dL_dcolors_precomp, dL_dopacities, dL_dmeans3D, dL_dcov3Ds_precomp, dL_ddc, dL_dsh, dL_dscales, dL_drotations);

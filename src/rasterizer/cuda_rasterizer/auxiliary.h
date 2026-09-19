@@ -228,4 +228,21 @@ throw std::runtime_error(cudaGetErrorString(ret)); \
 } \
 }
 
+
+// Smooth, per-pixel attenuation behind a fixed observed surface.
+// Reference depth, margin and confidence are observations, not optimized variables.
+__device__ inline float depthVisibilityGate(const float* reference, int pixel, int size,
+                                           float depth, float* derivative = nullptr)
+{
+    if (derivative) *derivative = 0.f;
+    if (!reference || !(reference[pixel] > 0.f)) return 1.f;
+    const float margin = reference[size + pixel];
+    const float strength = reference[2 * size + pixel];
+    const float excess = depth - reference[pixel] - margin;
+    if (!(strength > 0.f) || !(excess > 0.f)) return 1.f;
+    const float tail = expf(-excess / margin);
+    if (derivative) *derivative = -strength * tail / margin;
+    return 1.f - strength + strength * tail;
+}
+
 #endif

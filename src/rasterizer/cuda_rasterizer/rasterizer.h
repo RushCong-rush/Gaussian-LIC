@@ -60,7 +60,8 @@ namespace CudaRasterizer {
 			bool no_color = false,
 			bool equirectangular = false,
 			bool save_backward = true,
-			const bool* valid_mask = nullptr);
+			const bool* valid_mask = nullptr,
+            const float* depth_visibility = nullptr, float* visibility_weights = nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R, int B,
@@ -102,7 +103,7 @@ namespace CudaRasterizer {
 			float* dL_ddepth,
 			const float lambda_erank,
 			bool debug,
-			bool equirectangular = false);
+			bool equirectangular = false, const float* depth_visibility = nullptr);
 	};
 };
 
