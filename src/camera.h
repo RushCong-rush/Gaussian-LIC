@@ -145,6 +145,7 @@ public:
     std::string image_name_;
     std::string observation_cache_path_;
     int frame_index_ = -1;
+    double timestamp_ = 0.;
 
     int image_width_;              
     int image_height_;

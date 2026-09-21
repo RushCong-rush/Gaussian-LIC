@@ -697,6 +697,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "train_" + formatted_str + ".jpg";
         cam->frame_index_ = frame_index;
+        cam->timestamp_ = cur_frame.image_msg->header.stamp.toSec();
         cam->has_dap_depth_ = has_dap_fusion;
 
         cam->setCameraModel(equirectangular_);
@@ -726,6 +727,7 @@ void Dataset::addFrame(Frame& cur_frame)
         std::string formatted_str = ss.str();
         cam->image_name_ = "test_" + formatted_str + ".jpg";
         cam->frame_index_ = frame_index;
+        cam->timestamp_ = cur_frame.image_msg->header.stamp.toSec();
         cam->has_dap_depth_ = has_dap_fusion;
 
         cam->setCameraModel(equirectangular_);
@@ -796,6 +798,7 @@ GaussianModel::GaussianModel(const Params& prm)
 
     apply_exposure_ = prm.apply_exposure;
     exposure_lr_ = prm.exposure_lr;
+    if (apply_exposure_) exposures_ = std::make_unique<ExposureCompensation>(exposure_lr_);
     skybox_points_num_ = prm.skybox_points_num;
     skybox_radius_ = prm.skybox_radius;
 
@@ -869,11 +872,6 @@ torch::Tensor GaussianModel::getCovariance(int scaling_modifier)
     symm_uncertainty.select(1, 5).copy_(actual_covariance.index({torch::indexing::Slice(), 2, 2}));
 
     return symm_uncertainty;
-}
-
-torch::Tensor GaussianModel::getExposure()
-{
-    return exposure_;
 }
 
 void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
@@ -989,13 +987,6 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     this->scaling_ = scales.requires_grad_();  // (n, 3)
     this->rotation_ = rots.requires_grad_();  // (n, 4)
     this->opacity_ = opacities.requires_grad_();  // (n, 1)
-
-    if (apply_exposure_)
-    {
-        torch::Tensor exposure = torch::eye(3, torch::kFloat32).cuda();
-        exposure = torch::cat({exposure, torch::zeros({3, 1}, torch::kFloat32).cuda()}, 1);
-        this->exposure_ = exposure.requires_grad_();  // (3, 4)
-    }
 
     GAUSSIAN_MODEL_TENSORS_TO_VEC
     
@@ -1126,11 +1117,7 @@ void GaussianModel::trainingSetup()
     sparse_optimizer_->add_param_group(Tensor_vec_rotation_);
     sparse_optimizer_->param_groups()[5].options().set_lr(rotation_lr_);
 
-    if (apply_exposure_)
-    {
-        this->exposure_optimizer_.reset(new torch::optim::Adam(Tensor_vec_exposure_, {}));
-        exposure_optimizer_->param_groups()[0].options().set_lr(exposure_lr_);
-    }
+
 }
 
 void GaussianModel::densificationPostfix(
@@ -1807,6 +1794,8 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         latitude_weights = loss_utils::latitude_weights(
             dataset->train_cameras_.front()->image_height_,
             dataset->train_cameras_.front()->image_width_, bg.options());
+    if (pc->apply_exposure_)
+        for (const auto& camera : dataset->train_cameras_) pc->exposures_->add(camera->timestamp_);
     pc->optimization_view_counts_.resize(train_camera_num, 0);
     for (int idx : opt_list)
     {
@@ -1894,11 +1883,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
         pc->sparse_optimizer_->step();
         pc->sparse_optimizer_->zero_grad(true);
-        if (pc->apply_exposure_)
-        {
-            pc->exposure_optimizer_->step();
-            pc->exposure_optimizer_->zero_grad(true);
-        }
+        if (pc->apply_exposure_) pc->exposures_->step(viewpoint_cam->timestamp_);
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
@@ -1916,6 +1901,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     std::cout << "\n        [Number of Final Gaussians] " << pc->getXYZ().size(0) << std::endl;
 
     fs::create_directories(result_path);
+    if (pc->apply_exposure_) pc->exposures_->save(result_path + "/exposure.csv");
 
     std::string render_dir_path = result_path + "/render";
     if (fs::exists(render_dir_path)) fs::remove_all(render_dir_path);

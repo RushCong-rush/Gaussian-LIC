@@ -105,6 +105,8 @@ render(const std::shared_ptr<Camera>& viewpoint_camera,
                                     rotations,
                                     cov3D_precomp);
     auto rendered_image = std::get<0>(rasterizer_result);
+    if (use_trained_exposure && !no_color)
+        rendered_image = pc->exposures_->correct(rendered_image, viewpoint_camera->timestamp_);
     auto radii = std::get<1>(rasterizer_result);
     auto rendered_depth = std::get<2>(rasterizer_result);
     auto rendered_final_T = std::get<3>(rasterizer_result);

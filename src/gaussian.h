@@ -17,6 +17,7 @@
  */
 
 #pragma once
+#include "exposure.h"
 
 #include <memory>
 #include <string>
@@ -162,8 +163,7 @@ public:
     this->Tensor_vec_feature_rest_ = {this->features_rest_}; \
     this->Tensor_vec_opacity_ = {this->opacity_};            \
     this->Tensor_vec_scaling_ = {this->scaling_};            \
-    this->Tensor_vec_rotation_ = {this->rotation_};          \
-    this->Tensor_vec_exposure_ = {this->exposure_};
+    this->Tensor_vec_rotation_ = {this->rotation_};
 
 #define GAUSSIAN_MODEL_INIT_TENSORS(device_type)                                             \
     this->xyz_ = torch::empty(0, torch::TensorOptions().device(device_type));                \
@@ -172,7 +172,6 @@ public:
     this->scaling_ = torch::empty(0, torch::TensorOptions().device(device_type));            \
     this->rotation_ = torch::empty(0, torch::TensorOptions().device(device_type));           \
     this->opacity_ = torch::empty(0, torch::TensorOptions().device(device_type));            \
-    this->exposure_ = torch::empty(0, torch::TensorOptions().device(device_type));           \
     GAUSSIAN_MODEL_TENSORS_TO_VEC
 
 class GaussianModel
@@ -188,7 +187,6 @@ public:
     torch::Tensor getOpacity();
     torch::Tensor getCovariance(int scaling_modifier);
 
-    torch::Tensor getExposure();
 
     void initialize(const std::shared_ptr<Dataset>& dataset);
     void saveMap(const std::string& result_path);
@@ -248,20 +246,18 @@ public:
     torch::Tensor rotation_;
     torch::Tensor opacity_;
     
-    torch::Tensor exposure_;
 
     std::vector<torch::Tensor> Tensor_vec_xyz_,
                                Tensor_vec_feature_dc_,
                                Tensor_vec_feature_rest_,
                                Tensor_vec_opacity_,
                                Tensor_vec_scaling_ ,
-                               Tensor_vec_rotation_,
-                               Tensor_vec_exposure_;
+                               Tensor_vec_rotation_;
 
     std::shared_ptr<torch::optim::Adam> optimizer_;
     std::shared_ptr<SparseGaussianAdam> sparse_optimizer_;
 
-    std::shared_ptr<torch::optim::Adam> exposure_optimizer_;
+    std::unique_ptr<ExposureCompensation> exposures_;
 
     bool is_init_;
 

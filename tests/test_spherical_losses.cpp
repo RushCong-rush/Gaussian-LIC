@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include "loss_utils.h"
 #include "depth_loss.h"
+#include "exposure.h"
 
 void require(bool ok, const char* message) {
     if (!ok) throw std::runtime_error(message);
@@ -64,5 +65,20 @@ int main() {
         torch::roll(target,{23},{3}),torch::roll(mask,{23},{1}),lat);
     require(std::abs(ws1.item<float>()-ws2.item<float>()) < 2.e-6,
             "latitude-weighted SSIM broke longitude invariance");
+    ExposureCompensation exposure(.02);
+    exposure.add(1.); exposure.add(3.);
+    auto signal = torch::linspace(.1, .7, 64, options);
+    auto observed = signal * 1.2 + .08;
+    for (int i = 0; i < 300; ++i) {
+        auto error = (exposure.correct(signal,3.) - observed).square().mean();
+        error.backward(); exposure.step(3.);
+    }
+    require(torch::allclose(exposure.correct(signal,1.),signal), "exposure anchor moved");
+    require((exposure.correct(signal,3.)-observed).abs().max().item<float>() < 1.e-4,
+            "per-frame exposure did not recover known gain and bias");
+    require(torch::allclose(exposure.parameters(2.), exposure.parameters(3.)*.5),
+            "held-out exposure interpolation changed");
+    require(torch::allclose(exposure.parameters(4.), exposure.parameters(3.)),
+            "online exposure must use the last available keyframe");
     std::cout << "spherical_loss_test passed\n";
 }
