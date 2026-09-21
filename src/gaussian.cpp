@@ -779,6 +779,7 @@ GaussianModel::GaussianModel(const Params& prm)
     rotation_lr_ = prm.rotation_lr;
     lambda_dssim_ = prm.lambda_dssim;
     latitude_weighting_ = prm.latitude_weighting;
+    lambda_iso_ = prm.lambda_iso;
     optimize_depth_ = prm.optimize_depth;
     normalize_depth_gradient_ = prm.normalize_depth_gradient;
     diagnose_depth_visibility_ = prm.diagnose_depth_visibility;
@@ -1878,6 +1879,8 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
                 : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
+        if (pc->lambda_iso_ > 0. && viewpoint_cam->is_equirectangular_)
+            loss += pc->lambda_iso_ * loss_utils::isotropic_loss(pc->getScaling());
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_forward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();

@@ -134,6 +134,9 @@ public:
         scaling_lr = node["scaling_lr"].as<double>();
         rotation_lr = node["rotation_lr"].as<double>();
         lambda_dssim = node["lambda_dssim"].as<double>();
+        lambda_iso = node["lambda_iso"] ? node["lambda_iso"].as<double>() : 0.0;
+        if (!std::isfinite(lambda_iso) || lambda_iso < 0.)
+            throw std::invalid_argument("lambda_iso must be finite and nonnegative");
         latitude_weighting = node["latitude_weighting"] ? node["latitude_weighting"].as<bool>() : true;
         optimize_depth = node["optimize_depth"].as<bool>();
         normalize_depth_gradient = node["normalize_depth_gradient"] ? node["normalize_depth_gradient"].as<bool>() : true;
@@ -205,6 +208,7 @@ public:
     double scaling_lr;
     double rotation_lr;
     double lambda_dssim;
+    double lambda_iso = 0.;
     bool latitude_weighting = true;
     bool optimize_depth;
     bool normalize_depth_gradient;

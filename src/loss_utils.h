@@ -27,6 +27,12 @@
 namespace loss_utils
 {
 
+// ODGS-SLAM Eq. 11: mean absolute axis deviation in physical scale space.
+inline torch::Tensor isotropic_loss(const torch::Tensor& scales)
+{
+    return (scales - scales.mean(1, true)).abs().mean();
+}
+
 inline torch::Tensor l1_loss(torch::Tensor &network_output, torch::Tensor &gt)
 {
     return torch::abs(network_output - gt).mean();

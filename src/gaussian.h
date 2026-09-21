@@ -223,6 +223,7 @@ public:
     double scaling_lr_;
     double rotation_lr_;
     double lambda_dssim_;
+    double lambda_iso_ = 0.;
     bool latitude_weighting_ = false;
     bool optimize_depth_;
     bool normalize_depth_gradient_;

@@ -64,5 +64,16 @@ int main() {
         torch::roll(target,{23},{3}),torch::roll(mask,{23},{1}),lat);
     require(std::abs(ws1.item<float>()-ws2.item<float>()) < 2.e-6,
             "latitude-weighted SSIM broke longitude invariance");
+    auto isotropic = torch::ones({4,3}, options).requires_grad_();
+    auto isotropic_error = loss_utils::isotropic_loss(isotropic);
+    require(isotropic_error.item<float>() == 0.f, "isotropic scales have nonzero penalty");
+    isotropic_error.backward();
+    require(isotropic.grad().abs().sum().item<float>() == 0.f, "isotropic scales have nonzero gradient");
+    auto elongated = torch::tensor({{1.f,1.f,4.f}}, options).requires_grad_();
+    auto penalty = loss_utils::isotropic_loss(elongated);
+    penalty.backward();
+    require(std::abs(penalty.item<float>() - 4.f/3.f) < 1.e-6, "axis deviation normalization is wrong");
+    require(elongated.grad()[0][2].item<float>() > 0 && elongated.grad()[0][0].item<float>() < 0,
+            "isotropy gradient does not oppose elongation");
     std::cout << "spherical_loss_test passed\n";
 }
