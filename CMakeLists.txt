@@ -122,3 +122,6 @@ target_link_libraries(mapping_params_test
                       ${catkin_LIBRARIES}
                       ${OpenCV_LIBS}
                       ${YAML_CPP_LIBRARIES})
+
+add_executable(spherical_loss_test tests/test_spherical_losses.cpp src/fused-ssim/ssim.cu)
+target_link_libraries(spherical_loss_test ${TORCH_LIBRARIES} ${Python3_LIBRARIES} ${CUDA_LIB_DIR}/libcudart.so)

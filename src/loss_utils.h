@@ -235,4 +235,21 @@ inline torch::Tensor fused_ssim_masked(
     return (map * weights).sum() / weights.sum().clamp_min(1.0f);
 }
 
+// Only longitude is periodic. Keep the existing vertical padding convention.
+inline torch::Tensor fused_ssim_erp(
+    const torch::Tensor& img1, const torch::Tensor& img2,
+    const torch::Tensor& mask = torch::Tensor())
+{
+    auto wrap = [](const torch::Tensor& image) {
+        return torch::cat({image.slice(3, image.size(3) - 5), image,
+                           image.slice(3, 0, 5)}, 3).contiguous();
+    };
+    auto wrapped1 = wrap(img1), wrapped2 = wrap(img2);
+    auto map = FusedSSIMMap::apply(C1, C2, wrapped1, wrapped2);
+    map = map.slice(3, 5, 5 + img1.size(3));
+    if (!mask.defined()) return map.mean();
+    auto weights = mask.to(map.options()).unsqueeze(0).unsqueeze(0).expand_as(map);
+    return (map * weights).sum() / weights.sum().clamp_min(1.0f);
+}
+
 }

@@ -1860,10 +1860,13 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             : gt_image;
         torch::Tensor rendered_image_unsq = ssim_rendered.unsqueeze(0);
         torch::Tensor gt_image_unsq = ssim_gt.unsqueeze(0);
-        ssim_value = use_image_valid_mask
-            ? loss_utils::fused_ssim_masked(
-                rendered_image_unsq, gt_image_unsq, image_valid_mask)
-            : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
+        if (viewpoint_cam->is_equirectangular_)
+            ssim_value = loss_utils::fused_ssim_erp(rendered_image_unsq, gt_image_unsq,
+                use_image_valid_mask ? image_valid_mask : torch::Tensor());
+        else
+            ssim_value = use_image_valid_mask
+                ? loss_utils::fused_ssim_masked(rendered_image_unsq, gt_image_unsq, image_valid_mask)
+                : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
         torch::cuda::synchronize();
