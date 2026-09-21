@@ -241,6 +241,7 @@ __global__ void duplicateWithKeysErp(
 		float2 culling_xy = xy;
 		if (rect_idx == 1 && rect_count == 2)
 			culling_xy.x += xy.x - radii[idx] < 0.0f ? width : -width;
+		const int periodic_width = 2 * radii[idx] >= width ? width : 0;
 		const uint32_t rect_width = rect_max.x - rect_min.x;
 		const int32_t tile_count_init = (rect_max.y - rect_min.y) * rect_width;
 
@@ -253,7 +254,7 @@ __global__ void duplicateWithKeysErp(
 				const glm::vec2 tile_min = {x * BLOCK_X, y * BLOCK_Y};
 				const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 				glm::vec2 max_pos;
-				if (max_contrib_power_rect_gaussian_float(co, culling_xy, tile_min, tile_max, max_pos) <= opacity_factor_threshold)
+				if (max_contrib_power_periodic_rect(co, culling_xy, tile_min, tile_max, max_pos, periodic_width) <= opacity_factor_threshold)
 				{
 					uint64_t key = y * grid.x + x;
 					key <<= 32;
@@ -286,6 +287,7 @@ __global__ void duplicateWithKeysErp(
 				__shfl_sync(WARP_MASK, co.z, i),
 				__shfl_sync(WARP_MASK, co.w, i)};
 			const float opacity_factor_threshold_i = __shfl_sync(WARP_MASK, opacity_factor_threshold, i);
+			const int periodic_width_i = __shfl_sync(WARP_MASK, periodic_width, i);
 			const uint32_t rect_width_i = rect_max_i.x - rect_min_i.x;
 			const uint32_t rect_tile_count_i = (rect_max_i.y - rect_min_i.y) * rect_width_i;
 			const uint32_t remaining_tile_count = rect_tile_count_i - SEQUENTIAL_TILE_THRESH;
@@ -300,7 +302,7 @@ __global__ void duplicateWithKeysErp(
 				const glm::vec2 tile_min = {x * BLOCK_X, y * BLOCK_Y};
 				const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 				glm::vec2 max_pos;
-				const bool write = active_curr_it && max_contrib_power_rect_gaussian_float(co_i, xy_i, tile_min, tile_max, max_pos) <= opacity_factor_threshold_i;
+				const bool write = active_curr_it && max_contrib_power_periodic_rect(co_i, xy_i, tile_min, tile_max, max_pos, periodic_width_i) <= opacity_factor_threshold_i;
 				const uint32_t write_ballot = __ballot_sync(WARP_MASK, write);
 				const uint32_t n_writes = __popc(write_ballot);
 				const uint32_t write_offset = off_i + __popc(write_ballot & lane_mask_allprev_excl);

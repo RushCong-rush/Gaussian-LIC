@@ -77,6 +77,24 @@ __device__ inline float max_contrib_power_rect_gaussian_float(const float4 co,  
 	return max_contrib_power;
 }
 
+
+// Conservative periodic bound: each tile is emitted once even if several
+// wrapped copies contribute. Pixel evaluation still uses the nearest copy.
+__device__ inline float max_contrib_power_periodic_rect(
+    const float4 co, const float2 mean, const glm::vec2 rect_min,
+    const glm::vec2 rect_max, glm::vec2& max_pos, const int width)
+{
+    float power = max_contrib_power_rect_gaussian_float(co, mean, rect_min, rect_max, max_pos);
+    if (width > 0)
+    {
+        const float2 left = {mean.x - width, mean.y};
+        const float2 right = {mean.x + width, mean.y};
+        power = fminf(power, max_contrib_power_rect_gaussian_float(co, left, rect_min, rect_max, max_pos));
+        power = fminf(power, max_contrib_power_rect_gaussian_float(co, right, rect_min, rect_max, max_pos));
+    }
+    return power;
+}
+
 namespace FORWARD
 {
 	// Perform initial steps for each Gaussian prior to rasterization.

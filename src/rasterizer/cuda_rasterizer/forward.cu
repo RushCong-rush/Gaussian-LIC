@@ -188,7 +188,7 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 
 __device__ inline int computeTilebasedCullingTileCount(const bool active, const float4 co_init, const float2 xy_init,  
 													   const float opacity_power_threshold_init,
-													   const uint2 rect_min_init,  const uint2 rect_max_init) 
+													   const uint2 rect_min_init, const uint2 rect_max_init, const int periodic_width_init = 0)
 {
 	const int32_t tile_count_init = (rect_max_init.y - rect_min_init.y) * (rect_max_init.x - rect_min_init.x);
 	int tile_count = 0;
@@ -204,7 +204,7 @@ __device__ inline int computeTilebasedCullingTileCount(const bool active, const 
 			const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 
 			glm::vec2 max_pos;
-			float max_opac_factor = max_contrib_power_rect_gaussian_float(co_init, xy_init, tile_min, tile_max, max_pos);
+			float max_opac_factor = max_contrib_power_periodic_rect(co_init, xy_init, tile_min, tile_max, max_pos, periodic_width_init);
 			tile_count += (max_opac_factor <= opacity_power_threshold_init);
 		}
 	}
@@ -234,6 +234,7 @@ __device__ inline int computeTilebasedCullingTileCount(const bool active, const 
 			__shfl_sync(WARP_MASK, co_init.w, i),
 		};
 		const float opacity_power_threshold = __shfl_sync(WARP_MASK, opacity_power_threshold_init, i);
+		const int periodic_width = __shfl_sync(WARP_MASK, periodic_width_init, i);
 
 
 		const uint32_t rect_width = (rect_max.x - rect_min.x);
@@ -253,7 +254,7 @@ __device__ inline int computeTilebasedCullingTileCount(const bool active, const 
 			const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 
 			glm::vec2 max_pos;
-			const float max_opac_factor = max_contrib_power_rect_gaussian_float(co, xy, tile_min, tile_max, max_pos);
+			const float max_opac_factor = max_contrib_power_periodic_rect(co, xy, tile_min, tile_max, max_pos, periodic_width);
 
 			const uint32_t tile_contributes = active_curr_it && max_opac_factor <= opacity_power_threshold;
 
@@ -365,7 +366,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		const int rect_count = getErpRects(point_image, my_radius, W, grid, rect_min, rect_max, rect_min_1, rect_max_1);
 		const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
 		float2 culling_point = point_image;
-		tile_count = computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min, rect_max);
+		tile_count = computeTilebasedCullingTileCount(active, co, culling_point, opacity_factor_threshold, rect_min, rect_max, 2 * my_radius >= W ? W : 0);
 		// The cooperative counter needs every lane, including non-seam Gaussians.
 		culling_point.x += point_image.x - my_radius < 0.0f ? W : -W;
 		tile_count += computeTilebasedCullingTileCount(active && rect_count == 2, co, culling_point, opacity_factor_threshold, rect_min_1, rect_max_1);

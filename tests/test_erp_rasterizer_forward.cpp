@@ -24,7 +24,8 @@ struct RenderResult
 };
 
 RenderResult renderSingle(const float x, const float y, const float z,
-                          const bool equirectangular, const bool no_color = false)
+                          const bool equirectangular, const bool no_color = false,
+                          const int height = kHeight, const int width = kWidth)
 {
     const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     auto background = torch::zeros({3}, options);
@@ -41,7 +42,7 @@ RenderResult renderSingle(const float x, const float y, const float z,
 
     auto result = RasterizeGaussiansCUDA(
         background, means, colors, opacity, scales, rotations, 1.0f, empty,
-        view, projection, 1.0f, 1.0f, kHeight, kWidth,
+        view, projection, 1.0f, 1.0f, height, width,
         -1.0f, 1.0f, -1.0f, 1.0f, dc, empty, 0, camera_position,
         false, true, no_color, equirectangular);
 
@@ -289,7 +290,8 @@ void checkErpGradients()
 void checkMixedSeamTileCounts()
 {
     const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    auto means = torch::tensor({{0.1f, 0.5f, -5.0f}, {0.0f, 0.2f, 5.0f}}, options);
+    auto means = torch::tensor({{0.1f, 0.5f, -5.0f}, {0.0f, 0.2f, 5.0f},
+                                 {0.0f, -3.998f, -0.14f}, {0.0f, 3.998f, 0.14f}}, options);
     auto tileCount = [&](const torch::Tensor& points)
     {
         const auto n = points.size(0);
@@ -305,7 +307,8 @@ void checkMixedSeamTileCounts()
         return std::get<0>(result);
     };
     // Tile counts must be additive even when only some lanes cross the seam.
-    const int expected = tileCount(means.narrow(0, 0, 1)) + tileCount(means.narrow(0, 1, 1));
+    int expected = 0;
+    for (int i = 0; i < means.size(0); ++i) expected += tileCount(means.narrow(0, i, 1));
     require(expected > 64, "mixed-seam fixture must exercise cooperative tile counting");
     require(tileCount(means) == expected, "mixed-seam warp lost Gaussian-tile pairs");
     require(tileCount(means.flip({0})) == expected, "tile count depends on Gaussian ordering");
@@ -565,6 +568,21 @@ int main(int argc, char** argv)
     requireNear(pinhole_peak.second, kHeight / 2, 1, "pinhole vertical projection regressed");
     require(std::abs(pinhole.depth.index({kHeight / 2, kWidth / 2}).item<float>() - 4.0f) < 1.0e-3f,
             "pinhole z-depth regressed");
+
+    // Rotating an isotropic splat around the ERP vertical axis only rolls
+    // its image, including footprints wider than half the panorama.
+    for (int width : {128, 1024})
+    for (float degrees : {0.f, 80.f, 85.f, 87.f, 88.f, 89.f, -88.f})
+    {
+        const float latitude = degrees * pi / 180.f;
+        const float y = -4.f * std::sin(latitude);
+        const float z = 4.f * std::cos(latitude);
+        const auto centered = renderSingle(0.f, y, z, true, false, width / 2, width);
+        const auto wrapped = renderSingle(0.f, y, -z, true, false, width / 2, width);
+        require(torch::allclose(torch::roll(centered.alpha, {width / 2}, {1}),
+                               wrapped.alpha, 1.e-4, 1.e-5),
+                "wide ERP footprint was culled across the seam");
+    }
 
     checkSourceBalancedDepthLoss();
     checkDepthVisibilityGradients();
