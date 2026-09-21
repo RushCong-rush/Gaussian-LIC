@@ -39,6 +39,21 @@ inline torch::Tensor masked_l1_loss(
     return torch::abs(network_output - gt).masked_select(valid).mean();
 }
 
+// Keep the original valid-pixel normalization; weight errors, not images.
+inline torch::Tensor latitude_weights(int height, int width, const torch::TensorOptions& options)
+{
+    auto latitude = (torch::arange(height, options) / height - .5) * M_PI;
+    return torch::cos(latitude).clamp_min(0).unsqueeze(1).expand({height, width});
+}
+
+inline torch::Tensor weighted_l1_loss(
+    const torch::Tensor& image, const torch::Tensor& target,
+    const torch::Tensor& weights, const torch::Tensor& mask = torch::Tensor())
+{
+    auto error = torch::abs(image - target) * weights;
+    return mask.defined() ? error.masked_select(mask.expand_as(error)).mean() : error.mean();
+}
+
 inline torch::Tensor psnr(torch::Tensor &img1, torch::Tensor &img2)
 {
     auto mse = torch::pow(img1 - img2, 2).mean();
@@ -238,7 +253,8 @@ inline torch::Tensor fused_ssim_masked(
 // Only longitude is periodic. Keep the existing vertical padding convention.
 inline torch::Tensor fused_ssim_erp(
     const torch::Tensor& img1, const torch::Tensor& img2,
-    const torch::Tensor& mask = torch::Tensor())
+    const torch::Tensor& mask = torch::Tensor(),
+    const torch::Tensor& latitude_weights = torch::Tensor())
 {
     auto wrap = [](const torch::Tensor& image) {
         return torch::cat({image.slice(3, image.size(3) - 5), image,
@@ -247,6 +263,8 @@ inline torch::Tensor fused_ssim_erp(
     auto wrapped1 = wrap(img1), wrapped2 = wrap(img2);
     auto map = FusedSSIMMap::apply(C1, C2, wrapped1, wrapped2);
     map = map.slice(3, 5, 5 + img1.size(3));
+    // Return one minus weighted DSSIM so perfect reconstruction still scores one.
+    if (latitude_weights.defined()) map = 1 - (1 - map) * latitude_weights;
     if (!mask.defined()) return map.mean();
     auto weights = mask.to(map.options()).unsqueeze(0).unsqueeze(0).expand_as(map);
     return (map * weights).sum() / weights.sum().clamp_min(1.0f);

@@ -778,6 +778,7 @@ GaussianModel::GaussianModel(const Params& prm)
     scaling_lr_ = prm.scaling_lr;
     rotation_lr_ = prm.rotation_lr;
     lambda_dssim_ = prm.lambda_dssim;
+    latitude_weighting_ = prm.latitude_weighting;
     optimize_depth_ = prm.optimize_depth;
     normalize_depth_gradient_ = prm.normalize_depth_gradient;
     diagnose_depth_visibility_ = prm.diagnose_depth_visibility;
@@ -1801,6 +1802,11 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
+    torch::Tensor latitude_weights;
+    if (pc->latitude_weighting_ && dataset->equirectangular_)
+        latitude_weights = loss_utils::latitude_weights(
+            dataset->train_cameras_.front()->image_height_,
+            dataset->train_cameras_.front()->image_width_, bg.options());
     pc->optimization_view_counts_.resize(train_camera_num, 0);
     for (int idx : opt_list)
     {
@@ -1820,18 +1826,21 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             image_valid_mask.defined() && viewpoint_cam->is_equirectangular_;
         auto depth_mask = (gt_depth > 0) & (rendered_depth > 0);
         if (use_image_valid_mask) depth_mask &= image_valid_mask;
-        auto Ll1 = use_image_valid_mask
-            ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
-            : loss_utils::l1_loss(rendered_image, gt_image);
+        auto Ll1 = latitude_weights.defined()
+            ? loss_utils::weighted_l1_loss(rendered_image, gt_image, latitude_weights,
+                use_image_valid_mask ? image_valid_mask : torch::Tensor())
+            : (use_image_valid_mask
+                ? loss_utils::masked_l1_loss(rendered_image, gt_image, image_valid_mask)
+                : loss_utils::l1_loss(rendered_image, gt_image));
         torch::Tensor Ll1_depth;
         if (viewpoint_cam->has_dap_depth_ && dataset->dap_dense_depth_supervision_)
         {
             auto lidar_mask = viewpoint_cam->lidar_valid_mask_.to(torch::kCUDA).to(torch::kBool).squeeze();
             Ll1_depth = loss_utils::sourceBalancedDepthL1(rendered_depth, gt_depth, lidar_mask,
-                                                         depth_mask, pc->dap_depth_loss_relative_weight_);
+                                                         depth_mask, pc->dap_depth_loss_relative_weight_, latitude_weights);
         }
         else
-            Ll1_depth = loss_utils::maskedDepthL1(rendered_depth, gt_depth, depth_mask);
+            Ll1_depth = loss_utils::maskedDepthL1(rendered_depth, gt_depth, depth_mask, latitude_weights);
         // Record each keyframe once; logging does not select or modify observations.
         if (pc->diagnose_depth_visibility_ && pc->optimization_view_counts_[idx] == 1 &&
             viewpoint_cam->has_dap_depth_)
@@ -1862,7 +1871,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         torch::Tensor gt_image_unsq = ssim_gt.unsqueeze(0);
         if (viewpoint_cam->is_equirectangular_)
             ssim_value = loss_utils::fused_ssim_erp(rendered_image_unsq, gt_image_unsq,
-                use_image_valid_mask ? image_valid_mask : torch::Tensor());
+                use_image_valid_mask ? image_valid_mask : torch::Tensor(), latitude_weights);
         else
             ssim_value = use_image_valid_mask
                 ? loss_utils::fused_ssim_masked(rendered_image_unsq, gt_image_unsq, image_valid_mask)
