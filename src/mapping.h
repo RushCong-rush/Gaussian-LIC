@@ -78,6 +78,15 @@ public:
         if (lidar_patch_size < 0)
             throw std::invalid_argument("lidar_patch_size must be nonnegative (0 disables sampling)");
         min_point_depth = node["min_point_depth"] ? node["min_point_depth"].as<double>() : 0.0;
+        if (const auto body = node["body_filter"])
+        {
+            body_radius = body["radius_m"].as<double>();
+            body_height = body["height_m"].as<double>();
+            dap_body_radius = body["dap_radius_m"] ? body["dap_radius_m"].as<double>() : body_radius;
+            dap_body_height = body["dap_height_m"] ? body["dap_height_m"].as<double>() : body_height;
+            for (int k = 0; k < 3; ++k)
+                body_axis[k] = body["axis_camera"][k].as<double>();
+        }
         max_depth = node["max_depth"].as<double>();
         map_extension_min_depth_gap_m = node["map_extension_min_depth_gap_m"]
             ? node["map_extension_min_depth_gap_m"].as<double>() : 0.5;
@@ -164,6 +173,9 @@ public:
     int patch_size;
     int lidar_patch_size;
     double min_point_depth;
+    double body_radius = 0.0, body_height = 0.0;
+    double dap_body_radius = 0.0, dap_body_height = 0.0;
+    Eigen::Vector3d body_axis = Eigen::Vector3d::Zero();
     double max_depth;
     double map_extension_min_depth_gap_m;
     double map_extension_relative_depth_gap;

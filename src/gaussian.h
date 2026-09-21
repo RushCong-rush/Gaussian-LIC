@@ -65,6 +65,8 @@ public:
         dap_seed_lidar_dilation_pixels_(prm.dap_seed_lidar_dilation_pixels),
         patch_size_(prm.patch_size), lidar_patch_size_(prm.lidar_patch_size),
         min_point_depth_(prm.min_point_depth), max_depth_(prm.max_depth),
+        body_radius_(prm.body_radius), body_height_(prm.body_height), body_axis_(prm.body_axis),
+        dap_body_radius_(prm.dap_body_radius), dap_body_height_(prm.dap_body_height),
         all_frame_num_(0), is_keyframe_current_(false)
     {
         if (!prm.metric_mask_path.empty())
@@ -114,6 +116,18 @@ public:
     int lidar_patch_size_;
     double min_point_depth_;
     double max_depth_;
+    double body_radius_, body_height_;
+    Eigen::Vector3d body_axis_;
+    double dap_body_radius_, dap_body_height_;
+    bool insideBody(const Eigen::Vector3d& point_camera, bool dap_candidate = false) const
+    {
+        const double radius = dap_candidate ? dap_body_radius_ : body_radius_;
+        const double height = dap_candidate ? dap_body_height_ : body_height_;
+        if (radius <= 0.0) return false;
+        const double axial = point_camera.dot(body_axis_);
+        return axial >= 0.0 && axial <= height &&
+               (point_camera - axial * body_axis_).squaredNorm() <= radius * radius;
+    }
     std::string diagnosis_dir_;
     bool has_previous_keyframe_pose_ = false;
     Eigen::Matrix3d previous_keyframe_rotation_ = Eigen::Matrix3d::Identity();

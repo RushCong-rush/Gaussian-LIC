@@ -34,5 +34,13 @@ apply_exposure: false
 exposure_lr: 0.001
 skybox_points_num: 0
 skybox_radius: 1000
-# Shared by the combined runner: native LiDAR radius and ERP seed radius.
-min_point_depth: 0.3
+# Cylinder starts at the camera center and points toward the LiDAR center.
+min_point_depth: 0.0
+body_filter:
+  shape: cylinder
+  # Raw LiDAR filtering and LiDAR-derived GS candidates.
+  radius_m: 0.3
+  height_m: 0.3
+  # ERP DAP-derived GS candidates; same origin and axis.
+  dap_radius_m: 0.8
+  dap_height_m: 1.6

@@ -488,7 +488,7 @@ void Dataset::addFrame(Frame& cur_frame)
         Eigen::Vector3d pt_c = R_cw * pt_w + t_cw;
         const double point_depth = equirectangular_ ? pt_c.norm() : pt_c(2);
         Eigen::Vector3d point_color(pt.r / 255.0, pt.g / 255.0, pt.b / 255.0);
-        if (point_depth < min_point_depth_)
+        if (point_depth < min_point_depth_ || insideBody(pt_c))
         {
             ++lidar_points_filtered_near;
             continue;
@@ -607,6 +607,7 @@ void Dataset::addFrame(Frame& cur_frame)
                     Eigen::Vector3d cam_point((u - cx_) * depth / fx_, 
                                             (v - cy_) * depth / fy_, 
                                             depth);
+                    if (insideBody(cam_point)) continue;
                     Eigen::Vector3d world_point = q_wc * cam_point + t_wc;
 
                     pointcloud_.emplace_back(world_point);
@@ -660,6 +661,7 @@ void Dataset::addFrame(Frame& cur_frame)
                     depth * cos_latitude * std::sin(longitude),
                     -depth * std::sin(latitude),
                     depth * cos_latitude * std::cos(longitude));
+                if (insideBody(cam_point, true)) continue;
                 Eigen::Vector3d world_point = q_wc * cam_point + t_wc;
                 cv::Vec3f color = image_rgb.at<cv::Vec3f>(v, u);
                 pointcloud_.emplace_back(world_point);
