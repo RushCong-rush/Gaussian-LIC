@@ -134,7 +134,7 @@ public:
         scaling_lr = node["scaling_lr"].as<double>();
         rotation_lr = node["rotation_lr"].as<double>();
         lambda_dssim = node["lambda_dssim"].as<double>();
-        latitude_weighting = node["latitude_weighting"] ? node["latitude_weighting"].as<bool>() : false;
+        latitude_weighting = node["latitude_weighting"] ? node["latitude_weighting"].as<bool>() : true;
         optimize_depth = node["optimize_depth"].as<bool>();
         normalize_depth_gradient = node["normalize_depth_gradient"] ? node["normalize_depth_gradient"].as<bool>() : true;
         diagnose_depth_visibility = node["diagnose_depth_visibility"] ? node["diagnose_depth_visibility"].as<bool>() : false;
@@ -205,7 +205,7 @@ public:
     double scaling_lr;
     double rotation_lr;
     double lambda_dssim;
-    bool latitude_weighting = false;
+    bool latitude_weighting = true;
     bool optimize_depth;
     bool normalize_depth_gradient;
     bool diagnose_depth_visibility;
