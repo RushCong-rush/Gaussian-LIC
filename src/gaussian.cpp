@@ -627,7 +627,7 @@ void Dataset::addFrame(Frame& cur_frame)
             // the original sparse LiDAR initialization while adding a small,
             // controlled number of DAP-supported ERP Gaussians.
             cv::Mat depth_edges = depthEdgeMagnitude(depth_map, equirectangular_);
-            cv::Mat mask_not_edges = depth_edges < 0.1;
+            cv::Mat mask_not_edges = depth_edges < dap_seed_max_depth_gradient_;
             cv::Mat seed_mask = (depth_map >= min_point_depth_) &
                                 mask_not_edges & (depth_map < max_depth_);
             if (use_erp_valid_mask) seed_mask &= metric_mask_cv_;

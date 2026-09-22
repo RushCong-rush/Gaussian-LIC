@@ -63,6 +63,7 @@ public:
         dap_dense_depth_supervision_(prm.dap_dense_depth_supervision),
         dap_initialize_gaussians_(prm.dap_initialize_gaussians),
         dap_seed_lidar_dilation_pixels_(prm.dap_seed_lidar_dilation_pixels),
+        dap_seed_max_depth_gradient_(prm.dap_seed_max_depth_gradient),
         patch_size_(prm.patch_size), lidar_patch_size_(prm.lidar_patch_size),
         min_point_depth_(prm.min_point_depth), max_depth_(prm.max_depth),
         body_radius_(prm.body_radius), body_height_(prm.body_height), body_axis_(prm.body_axis),
@@ -112,6 +113,7 @@ public:
     bool dap_dense_depth_supervision_;
     bool dap_initialize_gaussians_;
     int dap_seed_lidar_dilation_pixels_;
+    double dap_seed_max_depth_gradient_;
     int patch_size_;
     int lidar_patch_size_;
     double min_point_depth_;

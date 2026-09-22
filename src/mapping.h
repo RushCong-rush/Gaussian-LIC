@@ -113,6 +113,10 @@ public:
             ? node["dap_initialize_gaussians"].as<bool>() : true;
         dap_seed_lidar_dilation_pixels = node["dap_seed_lidar_dilation_pixels"]
             ? node["dap_seed_lidar_dilation_pixels"].as<int>() : 0;
+        dap_seed_max_depth_gradient = node["dap_seed_max_depth_gradient"]
+            ? node["dap_seed_max_depth_gradient"].as<double>() : 0.1;
+        if (!std::isfinite(dap_seed_max_depth_gradient) || dap_seed_max_depth_gradient <= 0.0)
+            throw std::invalid_argument("dap_seed_max_depth_gradient must be finite and positive");
         std::string pkg_path = ros::package::getPath("gaussian_lic");
         if (height == 512 && width == 640) engine_path = pkg_path + "/ckpt/spnet_512_640.engine";
         if (height == 480 && width == 640) engine_path = pkg_path + "/ckpt/spnet_480_640.engine";
@@ -187,6 +191,7 @@ public:
     bool dap_dense_depth_supervision;
     bool dap_initialize_gaussians;
     int dap_seed_lidar_dilation_pixels;
+    double dap_seed_max_depth_gradient;
     std::string engine_path;
 
     /// gaussian
