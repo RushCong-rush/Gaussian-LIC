@@ -138,11 +138,11 @@ void saveDisplayRender(const std::shared_ptr<Camera>& camera,
                        const std::string& metric_render_dir)
 {
     torch::NoGradGuard no_grad;
-    auto white = torch::ones({3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto background = torch::zeros({3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     // A separate pass preserves the existing metric render and the camera masks.
-    auto pkg = render(camera, pc, white, pc->apply_exposure_, false, 1.0f, false);
-    // The rasterizer returns premultiplied foreground RGB without background.
-    auto display = std::get<0>(pkg) + std::get<2>(pkg) * white.view({3, 1, 1});
+    auto pkg = render(camera, pc, background, pc->apply_exposure_, false, 1.0f, false);
+    // Match the RGB used by training and evaluation; do not add a background.
+    auto display = std::get<0>(pkg);
     auto rgb = display.detach().clamp(0, 1).to(torch::kCPU)
         .permute({1, 2, 0}).contiguous().mul(255).to(torch::kUInt8);
     cv::Mat image(camera->image_height_, camera->image_width_, CV_8UC3, rgb.data_ptr<uint8_t>());
