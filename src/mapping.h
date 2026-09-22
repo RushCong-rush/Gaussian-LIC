@@ -130,6 +130,15 @@ public:
             ? node["export_third_person_final_video"].as<bool>() : false;
         export_third_person_online_video = node["export_third_person_online_video"]
             ? node["export_third_person_online_video"].as<bool>() : false;
+        if (node["third_person_front_axis_camera"])
+        {
+            const auto axis = node["third_person_front_axis_camera"].as<std::vector<double>>();
+            if (axis.size() != 3) throw std::invalid_argument("third_person_front_axis_camera requires 3 values");
+            third_person_front_axis_camera = Eigen::Vector3d(axis[0], axis[1], axis[2]);
+            if (!third_person_front_axis_camera.allFinite() || third_person_front_axis_camera.norm() < 1.e-6)
+                throw std::invalid_argument("third_person_front_axis_camera must be a finite nonzero vector");
+            third_person_front_axis_camera.normalize();
+        }
         random_background = node["random_background"].as<bool>();
         convert_SHs_python = node["convert_SHs_python"].as<bool>();
         compute_cov3D_python = node["compute_cov3D_python"].as<bool>();
@@ -204,6 +213,7 @@ public:
     bool white_background;
     bool export_third_person_final_video = false;
     bool export_third_person_online_video = false;
+    Eigen::Vector3d third_person_front_axis_camera = Eigen::Vector3d::UnitZ();
     bool random_background;
     bool convert_SHs_python;
     bool compute_cov3D_python;

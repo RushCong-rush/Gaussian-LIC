@@ -410,7 +410,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
 
     std::unique_ptr<ThirdPersonExport> third_person;
     if (prm.export_third_person_final_video || prm.export_third_person_online_video)
-        third_person = std::make_unique<ThirdPersonExport>(result_path);
+        third_person = std::make_unique<ThirdPersonExport>(result_path, prm.third_person_front_axis_camera);
 
     Frame cur_frame;
     while (!exit_flag && ros::ok())

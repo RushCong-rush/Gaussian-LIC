@@ -6,7 +6,7 @@
 class ThirdPersonExport
 {
 public:
-    explicit ThirdPersonExport(const std::string& result_path);
+    ThirdPersonExport(const std::string& result_path, const Eigen::Vector3d& front_axis_camera);
     void addFrame(const std::shared_ptr<Camera>& camera);
     void saveOnline(const std::shared_ptr<GaussianModel>& map);
     void saveFinal(const std::shared_ptr<GaussianModel>& map);
@@ -17,6 +17,9 @@ private:
     std::string directory_;
     std::vector<std::shared_ptr<Camera>> views_;
     std::vector<Eigen::Vector3d> centers_;
+    std::vector<Eigen::Vector3d> front_axes_;
+    Eigen::Vector3d front_axis_camera_;
+    Eigen::Matrix<double, 3, Eigen::Dynamic> rays_;
     Eigen::Vector3d heading_ = Eigen::Vector3d::UnitX();
     std::ofstream poses_;
 };

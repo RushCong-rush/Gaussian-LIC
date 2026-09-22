@@ -35,6 +35,12 @@ int main(int argc, char** argv)
         exports["export_third_person_final_video"] = false;
         require(!Params(exports).export_third_person_final_video && Params(exports).export_third_person_online_video,
                 "Third-person online flag must be independent");
+        exports["third_person_front_axis_camera"] = std::vector<double>{0.0, 0.0, -2.0};
+        require((Params(exports).third_person_front_axis_camera + Eigen::Vector3d::UnitZ()).norm() < 1.e-12,
+                "Physical front orientation must be normalized and preserve direction");
+        exports.remove("third_person_front_axis_camera");
+        require((Params(exports).third_person_front_axis_camera - Eigen::Vector3d::UnitZ()).norm() < 1.e-12,
+                "Default front orientation must be +Z");
         require(baseline.normalize_depth_gradient, "Normalized depth gradients must default to enabled");
         require(baseline.dap_depth_loss_relative_weight == 0.1, "Default DAP relative weight changed");
         require(baseline.lidar_patch_size == 3, path + ": production profile must use LiDAR patch 3");

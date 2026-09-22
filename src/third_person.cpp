@@ -4,56 +4,86 @@
 #include <sstream>
 
 namespace {
-constexpr int width = 1280, height = 720;
-constexpr double back = 1.5, side = 0.6, above = 0.2, sphere_radius = 0.12;
+constexpr int width = 1280, height = 640;
+constexpr double back = 1.0, above = 0.2, sphere_radius = 0.12;
 
-cv::Point project(const Eigen::Vector3d& point, const Camera& view)
+cv::Point project(const Eigen::Vector3d& point)
 {
-    return cv::Point(cvRound(view.fx_ * point.x() / point.z() + view.cx_),
-                     cvRound(view.fy_ * point.y() / point.z() + view.cy_));
+    return cv::Point(cvRound(width * (.5 + std::atan2(point.x(), point.z()) / (2 * M_PI))),
+                     cvRound(height * (.5 + std::atan2(point.y(), std::hypot(point.x(), point.z())) / M_PI)));
+}
+
+void drawSegment(cv::Mat& image, cv::Point a, cv::Point b)
+{
+    // Draw the short arc across the ERP seam, never a line through the whole image.
+    if (b.x - a.x > width / 2) b.x -= width;
+    if (a.x - b.x > width / 2) b.x += width;
+    for (int offset : {-width, 0, width})
+    {
+        auto p = a + cv::Point(offset, 0), q = b + cv::Point(offset, 0);
+        if (cv::clipLine(image.size(), p, q))
+            cv::line(image, p, q, cv::Scalar(255, 220, 20), 2, cv::LINE_AA);
+    }
 }
 }
 
-ThirdPersonExport::ThirdPersonExport(const std::string& result_path)
-    : directory_(result_path + "/third_person")
+ThirdPersonExport::ThirdPersonExport(const std::string& result_path, const Eigen::Vector3d& front_axis_camera)
+    : directory_(result_path + "/third_person"), front_axis_camera_(front_axis_camera)
 {
     std::filesystem::create_directories(directory_);
     poses_.open(directory_ + "/views.csv");
-    poses_ << "frame,camera_x,camera_y,camera_z,view_x,view_y,view_z,heading_x,heading_y\n";
+    poses_ << "frame,camera_x,camera_y,camera_z,view_x,view_y,view_z,heading_x,heading_y,front_x,front_y,front_z\n";
     poses_ << std::setprecision(12);
+    rays_.resize(3, width * height);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+        {
+            const double lon = (double(x) / width - .5) * 2 * M_PI;
+            const double lat = (double(y) / height - .5) * M_PI;
+            rays_.col(y * width + x) = Eigen::Vector3d(
+                std::cos(lat) * std::sin(lon), std::sin(lat), std::cos(lat) * std::cos(lon));
+        }
 }
 
 void ThirdPersonExport::addFrame(const std::shared_ptr<Camera>& camera)
 {
     const Eigen::Matrix3d rotation = camera->R_cw_.transpose();
     const Eigen::Vector3d center = -rotation * camera->t_cw_;
-    Eigen::Vector3d heading = rotation.col(2);
-    heading.z() = 0;
-    // Keep the last horizontal heading when the source camera points vertically.
-    if (heading.norm() > 1.e-4)
+    const Eigen::Vector3d front = (rotation * front_axis_camera_).normalized();
+    if (centers_.empty())
     {
-        heading.normalize();
-        heading_ = centers_.empty() ? heading : (0.85 * heading_ + 0.15 * heading).normalized();
+        // Before any motion, use the physical front axis as an initial heading.
+        Eigen::Vector3d horizontal = front;
+        horizontal.z() = 0;
+        if (horizontal.norm() > 1.e-4) heading_ = horizontal.normalized();
+    }
+    else
+    {
+        // Causal displacement over five processed frames (0.5 s at 10 Hz).
+        const size_t previous = centers_.size() > 5 ? centers_.size() - 5 : 0;
+        Eigen::Vector3d displacement = center - centers_[previous];
+        displacement.z() = 0;
+        // Hold the last heading while stationary instead of following pose jitter.
+        if (displacement.norm() > .05) heading_ = displacement.normalized();
     }
     const Eigen::Vector3d up = Eigen::Vector3d::UnitZ();
-    const Eigen::Vector3d right = heading_.cross(up).normalized();
-    const Eigen::Vector3d eye = center - back * heading_ + side * right + above * up;
-    const Eigen::Vector3d forward = (center + 0.35 * heading_ - eye).normalized();
+    const Eigen::Vector3d eye = center - back * heading_ + above * up;
     Eigen::Matrix3d view_rotation;
-    view_rotation.col(0) = forward.cross(up).normalized();
-    view_rotation.col(1) = forward.cross(view_rotation.col(0));
-    view_rotation.col(2) = forward;
+    view_rotation.col(0) = heading_.cross(up).normalized();
+    view_rotation.col(1) = -up;
+    view_rotation.col(2) = heading_;
     auto view = std::make_shared<Camera>();
-    const double focal = width / (2.0 * std::tan(85.0 * M_PI / 360.0));
-    view->setCameraModel(false);
-    view->setIntrinsic(width, height, focal, focal, width / 2.0, height / 2.0);
+    view->setCameraModel(true);
+    view->setIntrinsic(width, height, width / (2 * M_PI), height / M_PI, width / 2.0, height / 2.0);
     view->setPose(view_rotation, eye);
     view->frame_index_ = camera->frame_index_;
     centers_.push_back(center);
+    front_axes_.push_back(front);
     views_.push_back(view);
     poses_ << camera->frame_index_ << ',' << center.x() << ',' << center.y() << ',' << center.z()
            << ',' << eye.x() << ',' << eye.y() << ',' << eye.z()
-           << ',' << heading_.x() << ',' << heading_.y() << '\n';
+           << ',' << heading_.x() << ',' << heading_.y()
+           << ',' << front.x() << ',' << front.y() << ',' << front.z() << '\n';
 }
 
 void ThirdPersonExport::saveOnline(const std::shared_ptr<GaussianModel>& map)
@@ -92,31 +122,37 @@ void ThirdPersonExport::saveFrame(size_t index, const std::shared_ptr<GaussianMo
     {
         const Eigen::Vector3d a = view->R_cw_ * centers_[i - 1] + view->t_cw_;
         const Eigen::Vector3d b = view->R_cw_ * centers_[i] + view->t_cw_;
-        if (a.z() <= .05 || b.z() <= .05) continue;
-        auto p = project(a, *view), q = project(b, *view);
-        if (cv::clipLine(image.size(), p, q))
-            cv::line(image, p, q, cv::Scalar(255, 220, 20), 3, cv::LINE_AA);
+        const int steps = std::max(1, int(std::ceil((b - a).norm() / .03)));
+        for (int j = 0; j < steps; ++j)
+        {
+            const Eigen::Vector3d p = a + (b - a) * (double(j) / steps);
+            const Eigen::Vector3d q = a + (b - a) * (double(j + 1) / steps);
+            if (p.norm() > .05 && q.norm() > .05) drawSegment(image, project(p), project(q));
+        }
     }
     const Eigen::Vector3d center = view->R_cw_ * centers_[index] + view->t_cw_;
-    const cv::Point pixel = project(center, *view);
-    const int radius = std::max(1, cvRound(view->fx_ * sphere_radius / center.z()));
-    for (int y = std::max(0, pixel.y - radius); y <= std::min(height - 1, pixel.y + radius); ++y)
-        for (int x = std::max(0, pixel.x - radius); x <= std::min(width - 1, pixel.x + radius); ++x)
+    const Eigen::Vector3d front = view->R_cw_ * front_axes_[index];
+    // Ray/sphere intersections preserve hemisphere orientation in the ERP projection.
+    // Blend the far and near surfaces in that order to show a translucent globe.
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
         {
-            const double u = double(x - pixel.x) / radius, v = double(y - pixel.y) / radius;
-            if (u * u + v * v > 1) continue;
-            const double z = std::sqrt(1 - u * u - v * v);
-            const double shade = .45 + .55 * std::max(0.0, -.3 * u - .4 * v + .866 * z);
-            const double alpha = .35 + .2 * z;
-            const cv::Vec3d blue(255 * shade, 145 * shade, 40 * shade);
+            const Eigen::Vector3d ray = rays_.col(y * width + x);
+            const double along = ray.dot(center);
+            const double discriminant = along * along - center.squaredNorm() + sphere_radius * sphere_radius;
+            if (along <= 0 || discriminant < 0) continue;
             auto& value = image.at<cv::Vec3b>(y, x);
-            for (int c = 0; c < 3; ++c)
-                value[c] = cv::saturate_cast<uchar>((1 - alpha) * value[c] + alpha * blue[c]);
+            for (double sign : {1.0, -1.0})
+            {
+                const Eigen::Vector3d normal = ((along + sign * std::sqrt(discriminant)) * ray - center) / sphere_radius;
+                const double shade = .65 + .35 * std::abs(normal.dot(ray));
+                const cv::Vec3d color = normal.dot(front) >= 0
+                    ? cv::Vec3d(55, 60, 255) : cv::Vec3d(255, 125, 35);
+                const double alpha = sign > 0 ? .12 : .5;
+                for (int c = 0; c < 3; ++c)
+                    value[c] = cv::saturate_cast<uchar>((1 - alpha) * value[c] + alpha * shade * color[c]);
+            }
         }
-    cv::circle(image, pixel, radius, cv::Scalar(255, 165, 65), 1, cv::LINE_AA);
-    const std::string label = "Third person | " + phase + " map | frame " + std::to_string(view->frame_index_);
-    cv::putText(image, label, {18, 32}, cv::FONT_HERSHEY_SIMPLEX, .7, {0, 0, 0}, 3, cv::LINE_AA);
-    cv::putText(image, label, {18, 32}, cv::FONT_HERSHEY_SIMPLEX, .7, {255, 255, 255}, 1, cv::LINE_AA);
     const std::string output = directory_ + '/' + phase;
     std::filesystem::create_directories(output);
     std::ostringstream name;
