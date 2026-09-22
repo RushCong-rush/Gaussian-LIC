@@ -114,7 +114,7 @@ public:
         dap_seed_lidar_dilation_pixels = node["dap_seed_lidar_dilation_pixels"]
             ? node["dap_seed_lidar_dilation_pixels"].as<int>() : 0;
         dap_seed_max_depth_gradient = node["dap_seed_max_depth_gradient"]
-            ? node["dap_seed_max_depth_gradient"].as<double>() : 0.1;
+            ? node["dap_seed_max_depth_gradient"].as<double>() : 1.0;
         if (!std::isfinite(dap_seed_max_depth_gradient) || dap_seed_max_depth_gradient <= 0.0)
             throw std::invalid_argument("dap_seed_max_depth_gradient must be finite and positive");
         std::string pkg_path = ros::package::getPath("gaussian_lic");

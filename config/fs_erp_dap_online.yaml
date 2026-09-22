@@ -11,6 +11,7 @@ online_dap: true
 dap_topic: /depth_dap_for_gs
 dap_dense_depth_supervision: false
 patch_size: 10
+dap_seed_max_depth_gradient: 1.0
 max_depth: 200
 map_extension_min_depth_gap_m: 0.25
 map_extension_relative_depth_gap: 0.1
