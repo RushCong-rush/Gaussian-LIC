@@ -64,5 +64,23 @@ int main() {
         torch::roll(target,{23},{3}),torch::roll(mask,{23},{1}),lat);
     require(std::abs(ws1.item<float>()-ws2.item<float>()) < 2.e-6,
             "latitude-weighted SSIM broke longitude invariance");
+    auto rgb_zero = torch::zeros({3, 64, 128}, options);
+    auto constant = torch::full_like(rgb_zero, .2f);
+    require(std::abs(loss_utils::ws_psnr(constant, rgb_zero).item<float>() -
+                     (-10.f * std::log10(.04f))) < 1.e-5,
+            "WS-PSNR incorrectly scales constant error");
+    auto polar = rgb_zero.clone(), equatorial = rgb_zero.clone();
+    polar.slice(1, 0, 8).fill_(1);
+    equatorial.slice(1, 28, 36).fill_(1);
+    require(loss_utils::ws_psnr(polar, rgb_zero).item<float>() >
+            loss_utils::ws_psnr(equatorial, rgb_zero).item<float>(),
+            "WS-PSNR does not downweight polar error");
+    auto valid = torch::ones({64, 128}, options.dtype(torch::kBool));
+    valid.slice(0, 0, 8).fill_(false);
+    auto masked = constant.clone();
+    masked.slice(1, 0, 8).fill_(1);
+    require(std::abs(loss_utils::ws_psnr(masked, rgb_zero, valid).item<float>() -
+                     (-10.f * std::log10(.04f))) < 1.e-5,
+            "WS-PSNR includes invalid pixels or uses the wrong normalization");
     std::cout << "spherical_loss_test passed\n";
 }

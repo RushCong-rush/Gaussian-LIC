@@ -69,6 +69,19 @@ inline torch::Tensor masked_psnr(
     return 10.0f * torch::log10(1.0f / mse);
 }
 
+inline torch::Tensor ws_psnr(
+    const torch::Tensor& image, const torch::Tensor& target,
+    const torch::Tensor& mask = torch::Tensor())
+{
+    const auto height = image.size(1), width = image.size(2);
+    auto latitude = (.5 - (torch::arange(height, image.options()) + .5) / height) * M_PI;
+    auto weights = torch::cos(latitude).unsqueeze(1).expand({height, width});
+    if (mask.defined()) weights = weights * mask.to(image.options());
+    auto squared_error = (image - target).square().mean(0);
+    auto mse = (squared_error * weights).sum() / weights.sum();
+    return -10.0f * torch::log10(mse);
+}
+
 /** def psnr(img1, img2):
  *     mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
  *     return 20 * torch.log10(1.0 / torch.sqrt(mse))

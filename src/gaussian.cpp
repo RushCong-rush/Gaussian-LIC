@@ -1965,6 +1965,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
 
     {
         double psnrs = 0;
+        double ws_psnrs = 0;
         double ssims = 0;
         double lpipss = 0;
         for (const auto& train_camera : dataset->train_cameras_)
@@ -1987,6 +1988,10 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             double psnr = use_metric_mask
                 ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
                 : loss_utils::psnr(rendered_image, gt_image).item<double>();
+            double ws_psnr = train_camera->is_equirectangular_
+                ? loss_utils::ws_psnr(rendered_image, gt_image,
+                    use_metric_mask ? metric_mask : torch::Tensor()).item<double>()
+                : std::numeric_limits<double>::quiet_NaN();
             double ssim = use_metric_mask
                 ? loss_utils::ssim_masked(metric_rendered, metric_gt, metric_mask).item<double>()
                 : loss_utils::ssim(rendered_image, gt_image).item<double>();
@@ -2001,10 +2006,11 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
                 const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
                 const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
                 std::ofstream metrics(metrics_path, std::ios::app);
-                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol\n";
-                metrics << train_camera->image_name_ << ",train," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1\n";
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol,ws_psnr_db\n";
+                metrics << train_camera->image_name_ << ",train," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1," << ws_psnr << '\n';
             }
             psnrs += psnr;
+            ws_psnrs += ws_psnr;
             ssims += ssim;
             lpipss += lpips;
 
@@ -2046,14 +2052,18 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             cv::imwrite(render_depth_dir_path + "/" + train_camera->image_name_, c_img);
         }
         psnrs /= dataset->train_cameras_.size();
+        ws_psnrs /= dataset->train_cameras_.size();
         ssims /= dataset->train_cameras_.size();
         lpipss /= dataset->train_cameras_.size();
         std::cout << std::fixed << std::setprecision(2) << "        [Training View PSNR] " << psnrs << std::endl;
+        if (dataset->equirectangular_)
+            std::cout << std::fixed << std::setprecision(6) << "        [Training View WS-PSNR] " << ws_psnrs << std::endl;
         std::cout << std::fixed << std::setprecision(3) << "        [Training View SSIM] " << ssims << std::endl;
         std::cout << std::fixed << std::setprecision(3) << "        [Training View LPIPS] " << lpipss << std::endl;
     }
     {
         double psnrs = 0;
+        double ws_psnrs = 0;
         double ssims = 0;
         double lpipss = 0;
         for (const auto& test_camera : dataset->test_cameras_)
@@ -2076,6 +2086,10 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             double psnr = use_metric_mask
                 ? loss_utils::masked_psnr(rendered_image, gt_image, metric_mask).item<double>()
                 : loss_utils::psnr(rendered_image, gt_image).item<double>();
+            double ws_psnr = test_camera->is_equirectangular_
+                ? loss_utils::ws_psnr(rendered_image, gt_image,
+                    use_metric_mask ? metric_mask : torch::Tensor()).item<double>()
+                : std::numeric_limits<double>::quiet_NaN();
             double ssim = use_metric_mask
                 ? loss_utils::ssim_masked(metric_rendered, metric_gt, metric_mask).item<double>()
                 : loss_utils::ssim(rendered_image, gt_image).item<double>();
@@ -2090,10 +2104,11 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
                 const std::string metrics_path = diagnosis_dir_path + "/render_rgb_metrics.csv";
                 const bool write_header = !fs::exists(metrics_path) || fs::file_size(metrics_path) == 0;
                 std::ofstream metrics(metrics_path, std::ios::app);
-                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol\n";
-                metrics << test_camera->image_name_ << ",test," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1\n";
+                if (write_header) metrics << "image_name,split,psnr_db,ssim,lpips,lpips_protocol,ws_psnr_db\n";
+                metrics << test_camera->image_name_ << ",test," << psnr << ',' << ssim << ',' << lpips << ",spatial_valid_v1," << ws_psnr << '\n';
             }
             psnrs += psnr;
+            ws_psnrs += ws_psnr;
             ssims += ssim;
             lpipss += lpips;
 
@@ -2126,9 +2141,12 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             fs::remove(test_camera->observation_cache_path_);
         }
         psnrs /= dataset->test_cameras_.size();
+        ws_psnrs /= dataset->test_cameras_.size();
         ssims /= dataset->test_cameras_.size();
         lpipss /= dataset->test_cameras_.size();
         std::cout << std::fixed << std::setprecision(2) << "        [In-Sequence Novel View PSNR] " << psnrs << std::endl;
+        if (dataset->equirectangular_)
+            std::cout << std::fixed << std::setprecision(6) << "        [In-Sequence Novel View WS-PSNR] " << ws_psnrs << std::endl;
         std::cout << std::fixed << std::setprecision(3) << "        [In-Sequence Novel View SSIM] " << ssims << std::endl;
         std::cout << std::fixed << std::setprecision(3) << "        [In-Sequence Novel View LPIPS] " << lpipss << std::endl;
     }
