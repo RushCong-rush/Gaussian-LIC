@@ -5,7 +5,8 @@
 
 namespace {
 constexpr int width = 1280, height = 640;
-constexpr double back = 1.0, above = 0.2, sphere_radius = 0.12;
+constexpr double back = 1.0, left = 0.3, above = 0.2, sphere_radius = 0.12;
+constexpr double heading_time_constant = 1.0, max_turn_rate = M_PI / 4;
 
 cv::Point project(const Eigen::Vector3d& point)
 {
@@ -32,8 +33,8 @@ ThirdPersonExport::ThirdPersonExport(const std::string& result_path, const Eigen
 {
     std::filesystem::create_directories(directory_);
     poses_.open(directory_ + "/views.csv");
-    poses_ << "frame,camera_x,camera_y,camera_z,view_x,view_y,view_z,heading_x,heading_y,front_x,front_y,front_z\n";
-    poses_ << std::setprecision(12);
+    poses_ << "frame,camera_x,camera_y,camera_z,view_x,view_y,view_z,heading_x,heading_y,front_x,front_y,front_z,timestamp\n";
+    poses_ << std::setprecision(17);
     rays_.resize(3, width * height);
     for (int y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x)
@@ -45,7 +46,7 @@ ThirdPersonExport::ThirdPersonExport(const std::string& result_path, const Eigen
         }
 }
 
-void ThirdPersonExport::addFrame(const std::shared_ptr<Camera>& camera)
+void ThirdPersonExport::addFrame(const std::shared_ptr<Camera>& camera, double timestamp)
 {
     const Eigen::Matrix3d rotation = camera->R_cw_.transpose();
     const Eigen::Vector3d center = -rotation * camera->t_cw_;
@@ -64,10 +65,21 @@ void ThirdPersonExport::addFrame(const std::shared_ptr<Camera>& camera)
         Eigen::Vector3d displacement = center - centers_[previous];
         displacement.z() = 0;
         // Hold the last heading while stationary instead of following pose jitter.
-        if (displacement.norm() > .05) heading_ = displacement.normalized();
+        if (displacement.norm() > .05)
+        {
+            const double dt = timestamp - last_timestamp_;
+            const double yaw = std::atan2(heading_.y(), heading_.x());
+            const double target = std::atan2(displacement.y(), displacement.x());
+            const double difference = std::atan2(std::sin(target - yaw), std::cos(target - yaw));
+            // Smooth the shortest angular difference, including the +/-pi boundary.
+            const double step = std::clamp((1 - std::exp(-dt / heading_time_constant)) * difference,
+                                           -max_turn_rate * dt, max_turn_rate * dt);
+            heading_ = Eigen::Vector3d(std::cos(yaw + step), std::sin(yaw + step), 0);
+        }
     }
+    last_timestamp_ = timestamp;
     const Eigen::Vector3d up = Eigen::Vector3d::UnitZ();
-    const Eigen::Vector3d eye = center - back * heading_ + above * up;
+    const Eigen::Vector3d eye = center - back * heading_ + left * up.cross(heading_) + above * up;
     Eigen::Matrix3d view_rotation;
     view_rotation.col(0) = heading_.cross(up).normalized();
     view_rotation.col(1) = -up;
@@ -83,7 +95,7 @@ void ThirdPersonExport::addFrame(const std::shared_ptr<Camera>& camera)
     poses_ << camera->frame_index_ << ',' << center.x() << ',' << center.y() << ',' << center.z()
            << ',' << eye.x() << ',' << eye.y() << ',' << eye.z()
            << ',' << heading_.x() << ',' << heading_.y()
-           << ',' << front.x() << ',' << front.y() << ',' << front.z() << '\n';
+           << ',' << front.x() << ',' << front.y() << ',' << front.z() << ',' << timestamp << '\n';
 }
 
 void ThirdPersonExport::saveOnline(const std::shared_ptr<GaussianModel>& map)

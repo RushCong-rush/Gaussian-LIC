@@ -436,7 +436,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         const std::shared_ptr<Camera> current_camera = dataset->is_keyframe_current_
             ? dataset->train_cameras_.back()
             : dataset->test_cameras_.back();
-        if (third_person) third_person->addFrame(current_camera);
+        if (third_person) third_person->addFrame(current_camera, cur_frame.image_msg->header.stamp.toSec());
         if (dataset->is_keyframe_current_)
         {
             total_adding_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
