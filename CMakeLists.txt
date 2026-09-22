@@ -79,6 +79,7 @@ add_executable(gs_mapping
               ${PROJECT_SOURCE_DIR}/src/mapping.cpp 
               ${PROJECT_SOURCE_DIR}/src/pose_feedback.cpp
               ${PROJECT_SOURCE_DIR}/src/gaussian.cpp
+              ${PROJECT_SOURCE_DIR}/src/third_person.cpp
               ${PROJECT_SOURCE_DIR}/src/tinyply.cpp
               ${PROJECT_SOURCE_DIR}/src/depth_completer.cpp 
               ${PROJECT_SOURCE_DIR}/src/simple-knn/spatial.cu

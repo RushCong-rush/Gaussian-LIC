@@ -126,6 +126,10 @@ public:
             throw std::invalid_argument("sh_degree must be between 0 and 3");
         metric_mask_path = node["metric_mask_path"] ? node["metric_mask_path"].as<std::string>() : "";
         white_background = node["white_background"].as<bool>();
+        export_third_person_final_video = node["export_third_person_final_video"]
+            ? node["export_third_person_final_video"].as<bool>() : false;
+        export_third_person_online_video = node["export_third_person_online_video"]
+            ? node["export_third_person_online_video"].as<bool>() : false;
         random_background = node["random_background"].as<bool>();
         convert_SHs_python = node["convert_SHs_python"].as<bool>();
         compute_cov3D_python = node["compute_cov3D_python"].as<bool>();
@@ -198,6 +202,8 @@ public:
     int sh_degree;
     std::string metric_mask_path;
     bool white_background;
+    bool export_third_person_final_video = false;
+    bool export_third_person_online_video = false;
     bool random_background;
     bool convert_SHs_python;
     bool compute_cov3D_python;

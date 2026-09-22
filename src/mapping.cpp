@@ -17,6 +17,7 @@
  */
 
 #include "mapping.h"
+#include "third_person.h"
 #include "gaussian.h"
 #include "pose_feedback.h"
 #include <ros/callback_queue.h>
@@ -407,6 +408,10 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     double total_online_render_time = 0;
     size_t online_rendered_frames = 0;
 
+    std::unique_ptr<ThirdPersonExport> third_person;
+    if (prm.export_third_person_final_video || prm.export_third_person_online_video)
+        third_person = std::make_unique<ThirdPersonExport>(result_path);
+
     Frame cur_frame;
     while (!exit_flag && ros::ok())
     {
@@ -431,6 +436,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         const std::shared_ptr<Camera> current_camera = dataset->is_keyframe_current_
             ? dataset->train_cameras_.back()
             : dataset->test_cameras_.back();
+        if (third_person) third_person->addFrame(current_camera);
         if (dataset->is_keyframe_current_)
         {
             total_adding_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
@@ -449,6 +455,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                     std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
                 ++online_rendered_frames;
             }
+            if (prm.export_third_person_online_video) third_person->saveOnline(gaussians);
             const auto cache_start = std::chrono::steady_clock::now();
             current_camera->offloadObservations(
                 nonkeyframe_cache_dir + "/" + current_camera->image_name_ + ".pt");
@@ -496,6 +503,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         total_online_render_time +=
             std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
         ++online_rendered_frames;
+        if (prm.export_third_person_online_video) third_person->saveOnline(gaussians);
         completed_frames = dataset->all_frame_num_;
         map_ready.notify_all();
     }
@@ -542,6 +550,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     torch::NoGradGuard no_grad;
     evaluateVisualQuality(dataset, gaussians, result_path, lpips_path);
     gaussians->saveMap(result_path);
+    if (prm.export_third_person_final_video) third_person->saveFinal(gaussians);
 
     std::cout << "\n\n😋 Gaussian-LIC Done!\n\n\n";
     ros::shutdown();

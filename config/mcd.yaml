@@ -12,6 +12,8 @@ max_depth: 200
 
 sh_degree: 1
 white_background: true
+export_third_person_final_video: false
+export_third_person_online_video: false
 random_background: false  # no adjustment needed
 convert_SHs_python: false  # no adjustment needed
 compute_cov3D_python: false  # no adjustment needed

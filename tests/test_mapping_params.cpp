@@ -15,8 +15,26 @@ int main(int argc, char** argv)
     {
         if (file.path().extension() != ".yaml") continue;
         const std::string path = file.path().string();
-        const YAML::Node original = YAML::LoadFile(path);
+        std::cout << "Checking " << path << std::endl;
+        YAML::Node original = YAML::LoadFile(path);
+        // The runner supplies the calibrated body axis before constructing Params.
+        if (original["body_filter"] && !original["body_filter"]["axis_camera"])
+            original["body_filter"]["axis_camera"] = std::vector<double>{0.0, 0.0, 1.0};
         const Params baseline(original);
+        require(!baseline.export_third_person_final_video && !baseline.export_third_person_online_video,
+                "Third-person exports must default to disabled");
+        auto exports = YAML::Clone(original);
+        exports.remove("export_third_person_final_video");
+        exports.remove("export_third_person_online_video");
+        require(!Params(exports).export_third_person_final_video && !Params(exports).export_third_person_online_video,
+                "Missing third-person flags must default to disabled");
+        exports["export_third_person_final_video"] = true;
+        require(Params(exports).export_third_person_final_video && !Params(exports).export_third_person_online_video,
+                "Third-person final flag must be independent");
+        exports["export_third_person_online_video"] = true;
+        exports["export_third_person_final_video"] = false;
+        require(!Params(exports).export_third_person_final_video && Params(exports).export_third_person_online_video,
+                "Third-person online flag must be independent");
         require(baseline.normalize_depth_gradient, "Normalized depth gradients must default to enabled");
         require(baseline.dap_depth_loss_relative_weight == 0.1, "Default DAP relative weight changed");
         require(baseline.lidar_patch_size == 3, path + ": production profile must use LiDAR patch 3");
