@@ -8,10 +8,10 @@ cy: 266.985989326
 select_every_k_frame: 5
 depth_completion: true
 patch_size: 10
-max_depth: 20
+max_depth: 200
 
 sh_degree: 1
-white_background: false  # no adjustment needed
+white_background: true
 random_background: false  # no adjustment needed
 convert_SHs_python: false  # no adjustment needed
 compute_cov3D_python: false  # no adjustment needed
