@@ -5,6 +5,10 @@ fy: 162.97466
 cx: 512.0
 cy: 256.0
 camera_model: equirectangular
+# Evaluation only: repo-relative or absolute PNG; white excludes the fixed body.
+# Fixed structures only; rotating/blurred blades are not fully excluded.
+evaluation_body_mask_path: config/evaluation_masks/fs_x5_body_exclusion.png
+evaluation_body_mask_status: user_confirmed
 select_every_k_frame: 5
 depth_completion: false
 online_dap: true
