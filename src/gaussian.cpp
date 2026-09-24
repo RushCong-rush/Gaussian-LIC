@@ -1299,6 +1299,15 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
         cv::imwrite(diagnosis_dir + "/composite_" + camera->image_name_, colorize(fused, fused_valid_mask, visualization_max));
         cv::imwrite(diagnosis_dir + "/rendered_" + camera->image_name_, colorize(rendered, rendered_valid_mask, visualization_max));
         cv::imwrite(diagnosis_dir + "/absdiff_" + camera->image_name_, colorize(difference, valid, std::min(10.0, visualization_max)));
+        if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
+            export_depth != nullptr && std::string(export_depth) == "1")
+        {
+            const std::string directory = diagnosis_dir + "/final_depth_float";
+            fs::create_directories(directory);
+            const std::string stem = fs::path(camera->image_name_).stem().string();
+            cv::imwrite(directory + "/" + stem + "_composite.exr", fused);
+            cv::imwrite(directory + "/" + stem + "_rendered.exr", rendered);
+        }
     }
 
     std::vector<float> abs_errors;
