@@ -1689,6 +1689,27 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                 << farther_conflict_lidar.sum().item<int64_t>() << ','
                 << farther_conflict_dap.sum().item<int64_t>() << '\n';
 
+        // Record only centers actually admitted after pixel and patch selection.
+        const auto inserted = torch::stack({x_pixel, y_pixel, depths}, 1)
+            .index_select(0, keep_indices_tensor).index({valid_flag})
+            .to(torch::kCPU).contiguous();
+        const auto inserted_source = filtered_is_dap.index({valid_flag})
+            .to(torch::kCPU).to(torch::kInt32).contiguous();
+        const auto inserted_rescue = depth_rescued.index({valid_flag})
+            .to(torch::kCPU).to(torch::kInt32).contiguous();
+        const auto centers = inserted.accessor<float, 2>();
+        const auto sources = inserted_source.accessor<int32_t, 1>();
+        const auto rescued = inserted_rescue.accessor<int32_t, 1>();
+        const std::string inserted_dir = dataset->diagnosis_dir_ + "/extension_inserted";
+        fs::create_directories(inserted_dir);
+        std::ostringstream filename;
+        filename << inserted_dir << '/' << std::setw(6) << std::setfill('0') << frame_index << ".csv";
+        std::ofstream center_file(filename.str());
+        center_file << "u,v,depth_m,source,depth_rescued\n" << std::setprecision(9);
+        for (int64_t i = 0; i < inserted.size(0); ++i)
+            center_file << centers[i][0] << ',' << centers[i][1] << ',' << centers[i][2]
+                        << ',' << (sources[i] ? "DAP" : "LiDAR") << ',' << rescued[i] << '\n';
+
         if (saveDiagnosticImages(frame_index))
             saveMapExtensionImages(rendered_depth, rendered_alpha, diagnosis_mask,
                                    dataset->diagnosis_dir_, frame_index);
