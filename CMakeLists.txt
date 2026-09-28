@@ -92,6 +92,7 @@ add_executable(gs_mapping
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/forward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/backward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/rasterizer_impl.cu)
+target_compile_definitions(gs_mapping PRIVATE ODGS_FREE_SPACE_FOOTPRINT)
 add_dependencies(gs_mapping ${PROJECT_NAME}_generate_messages_cpp)
 target_link_libraries(gs_mapping 
                       ${catkin_LIBRARIES} 

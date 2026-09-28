@@ -40,6 +40,9 @@
 #include <torch/script.h>
 #include <memory>
 
+#include "daeo_diagnostics.h"
+#include "lidar_free_space.h"
+
 namespace fs = std::filesystem;
 
 namespace
@@ -1442,6 +1445,7 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
 void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
 {
     torch::NoGradGuard no_grad;
+    lidar_free_space::apply(dataset, pc);
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
     else bg = torch::zeros({3}, torch::kFloat32).cuda();
@@ -1759,6 +1763,8 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                << pc->map_extension_depth_rescued_opacity_ << ','
                << pc->map_extension_depth_rescued_scale_multiplier_ << '\n';
     }
+    daeo::append(dataset, pc, fused_point_cloud, scales, rots, opacities,
+                 filtered_is_dap.index({valid_flag}), accepted_depth_rescued);
     pc->densificationPostfix(fused_point_cloud, features_dc, features_rest, opacities, scales, rots);
 
     std::cout << std::fixed << std::setprecision(2) 
@@ -1793,6 +1799,8 @@ void decayOptList(int max_iters, const int train_camera_num,
 double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
 {
     pc->t_start_ = std::chrono::steady_clock::now();
+    daeo::initialize(dataset, pc);
+    daeo::snapshot(dataset, pc, "before");
     int updated_num = 0;
     std::vector<int> opt_list;
     int max_iters = 100;
@@ -1838,6 +1846,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             dataset->train_cameras_.front()->image_height_,
             dataset->train_cameras_.front()->image_width_, bg.options());
     pc->optimization_view_counts_.resize(train_camera_num, 0);
+    int daeo_step = 0;
     for (int idx : opt_list)
     {
         ++pc->optimization_view_counts_[idx];
@@ -1922,7 +1931,13 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto visible = std::get<4>(render_pkg);
         updated_num += visible.sum().item<int>();
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
+        const bool inspect = daeo::enabled() && daeo::selected(dataset->all_frame_num_-1) &&
+            (daeo_step < 3 || idx == train_camera_num-1);
+        daeo::Step daeo_state;
+        if (inspect) daeo_state = daeo::beforeStep(dataset, pc, visible);
         pc->sparse_optimizer_->step();
+        if (inspect) daeo::afterStep(dataset, pc, daeo_state, idx, daeo_step);
+        ++daeo_step;
         pc->sparse_optimizer_->zero_grad(true);
         if (pc->apply_exposure_)
         {
@@ -1934,6 +1949,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
     }
 
+    daeo::snapshot(dataset, pc, "after");
     return updated_num / opt_list.size();
 }
 
@@ -1942,6 +1958,7 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
                            const std::string& result_path,
                            const std::string& lpips_path)
 {
+    if (daeo::enabled()) for (auto c:dataset->train_cameras_) daeo::snapshot(dataset, pc, "final", c);
     std::cout << "\n     🎉 Evaluate Visual Quality 🎉\n";
     std::cout << "\n        [Number of Final Gaussians] " << pc->getXYZ().size(0) << std::endl;
 

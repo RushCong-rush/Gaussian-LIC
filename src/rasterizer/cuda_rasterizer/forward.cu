@@ -26,6 +26,23 @@
 #include <cooperative_groups/reduce.h>
 #include <type_traits>
 namespace cg = cooperative_groups;
+#ifdef ODGS_FREE_SPACE_FOOTPRINT
+// Isolated experiment: read-only contribution collection during one serialized render.
+__device__ const float* fs_reference=nullptr;
+__device__ const unsigned char* fs_candidates=nullptr;
+__device__ float* fs_weights=nullptr;
+__device__ int fs_count=0;
+__device__ float fs_abs_gap=.25f,fs_rel_gap=.1f;
+extern "C" void freeSpaceFootprintPointers(const float* ref,const unsigned char* candidates,float* weights,int n,float gap,float rel) {
+    cudaMemcpyToSymbol(fs_reference,&ref,sizeof(ref));
+    cudaMemcpyToSymbol(fs_candidates,&candidates,sizeof(candidates));
+    cudaMemcpyToSymbol(fs_weights,&weights,sizeof(weights));
+    cudaMemcpyToSymbol(fs_count,&n,sizeof(n));
+    cudaMemcpyToSymbol(fs_abs_gap,&gap,sizeof(gap));
+    cudaMemcpyToSymbol(fs_rel_gap,&rel,sizeof(rel));
+}
+#endif
+
 
 constexpr float ERP_PI = 3.14159265358979323846f;
 
@@ -545,7 +562,19 @@ renderCUDA(
 				depth_render += collected_depth[j] * alpha * T;
 				contributor_real++;
 
-			T = test_T;
+			#ifdef ODGS_FREE_SPACE_FOOTPRINT
+            if(fs_reference && fs_reference[pix_id]>0.f && fs_candidates[collected_id[j]]) {
+                const int id=collected_id[j];const float weight=alpha*T;
+                const float reference=fs_reference[pix_id];
+                atomicAdd(fs_weights+fs_count+id,weight);
+                if(collected_depth[j]+fmaxf(fs_abs_gap,fs_rel_gap*reference)<reference) {
+                    atomicAdd(fs_weights+id,weight);
+                    // Reference depths are positive, so integer ordering is identical.
+                    atomicMin(reinterpret_cast<int*>(fs_weights+2*fs_count+id),__float_as_int(reference));
+                }
+            }
+#endif
+            T = test_T;
 			last_contributor = contributor;
 		}
 	}
