@@ -1949,6 +1949,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
     }
 
+    lidar_free_space::afterOptimization(dataset, pc, opt_list);
     daeo::snapshot(dataset, pc, "after");
     return updated_num / opt_list.size();
 }
