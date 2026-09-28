@@ -34,7 +34,7 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     if(!d->equirectangular_ || option("ODGS_FREE_SPACE_PRUNE",1)==0) return;
     torch::NoGradGuard guard;auto start=std::chrono::steady_clock::now();
     auto c=d->train_cameras_.back();int H=c->image_height_,W=c->image_width_;
-    // Only measured LiDAR pixels; no dense DAP depths are used as free-space evidence.
+    // LiDAR evidence uses measured pixels; DAP evidence is handled separately below.
     auto dep=c->diagnostic_depth_.to(torch::kCUDA).reshape({H,W});
     auto valid=c->lidar_valid_mask_.to(torch::kCUDA).reshape({H,W}).to(torch::kBool)&torch::isfinite(dep)&(dep>0);
     if(d->metric_mask_.defined()) valid=valid&d->metric_mask_.to(torch::kCUDA).reshape({H,W}).to(torch::kBool);
@@ -109,7 +109,7 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     auto dap_remove=torch::zeros_like(lidar_remove),dap_conflict=torch::zeros_like(conflict);
     static torch::Tensor dap_votes;
     auto deletion_ref=ref;
-    if(option("ODGS_FREE_SPACE_DAP",0)!=0 && c->has_dap_depth_) {
+    if(option("ODGS_FREE_SPACE_DAP",1)!=0 && c->has_dap_depth_) {
         // DAP is weaker evidence: no nearby LiDAR, coherent depth and a larger gap.
         auto dense_valid=torch::isfinite(dep)&(dep>0);
         if(d->metric_mask_.defined())dense_valid=dense_valid&d->metric_mask_.to(torch::kCUDA).reshape({H,W}).to(torch::kBool);
@@ -124,13 +124,13 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
         auto dtol=torch::maximum(torch::full_like(dlo,.25),dlo*.1);
         auto coherent=(dcnt==25)&(count==0)&((dhi-dlo)<=dtol);
         auto dref=dlo.flatten().index_select(0,pix);
-        auto dgap=torch::maximum(torch::full_like(dref,option("ODGS_FREE_SPACE_DAP_GAP",1.f)),dref*option("ODGS_FREE_SPACE_DAP_REL",.3f));
+        auto dgap=torch::maximum(torch::full_like(dref,option("ODGS_FREE_SPACE_DAP_GAP",.5f)),dref*option("ODGS_FREE_SPACE_DAP_REL",.2f));
         dap_conflict=coherent.flatten().index_select(0,pix)&(r+dgap<dref)&large&(op>=option("ODGS_FREE_SPACE_OPACITY",.5f));
         if(pc->skybox_points_num_>0)dap_conflict.index_put_({torch::indexing::Slice(0,pc->skybox_points_num_)},false);
         if(!dap_votes.defined())dap_votes=torch::zeros({n},xyz.options());
         if(dap_votes.numel()<n)dap_votes=torch::cat({dap_votes,torch::zeros({n-dap_votes.numel()},xyz.options())});
         dap_votes=torch::where(dap_conflict,dap_votes+1,torch::zeros_like(dap_votes));
-        dap_remove=dap_votes>=option("ODGS_FREE_SPACE_DAP_VOTES",3);
+        dap_remove=dap_votes>=option("ODGS_FREE_SPACE_DAP_VOTES",1);
         deletion_ref=torch::where(dap_remove,dref,ref);
     }
     auto remove=lidar_remove|dap_remove;int64_t nr=remove.sum().item<int64_t>();
