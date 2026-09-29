@@ -42,6 +42,7 @@
 
 #include "daeo_diagnostics.h"
 #include "lidar_free_space.h"
+#include "daeo_warmup.h"
 
 namespace fs = std::filesystem;
 
@@ -1445,7 +1446,9 @@ static void saveDepthDiagnosis(const std::shared_ptr<Camera>& camera,
 void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
 {
     torch::NoGradGuard no_grad;
+    if(daeo::denseSelected(dataset->all_frame_num_-1))daeo::snapshot(dataset,pc,"predelete");
     lidar_free_space::apply(dataset, pc);
+    if(daeo::denseSelected(dataset->all_frame_num_-1))daeo::snapshot(dataset,pc,"postdelete");
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
     else bg = torch::zeros({3}, torch::kFloat32).cuda();
@@ -1803,7 +1806,9 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     daeo::snapshot(dataset, pc, "before");
     int updated_num = 0;
     std::vector<int> opt_list;
-    int max_iters = 100;
+    const char* max_views_env = std::getenv("ODGS_OPTIMIZATION_MAX_VIEWS");
+    int max_iters = max_views_env ? std::stoi(max_views_env) : 100;
+    TORCH_CHECK(max_iters > 0, "ODGS_OPTIMIZATION_MAX_VIEWS must be positive");
 
     int train_camera_num = dataset->train_cameras_.size();
     std::vector<int> all_list(train_camera_num);
@@ -1826,6 +1831,38 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         opt_list = sampleRecentKeyframes(train_camera_num, static_cast<int>(opt_list.size()),
                                         pc->optimization_recent_keyframes_, gen);
     std::shuffle(opt_list.begin(), opt_list.end(), gen);
+    // Repeat the same view schedule to vary training budget without changing
+    // the recent/history balance or consuming additional sampling RNG draws.
+    const char* passes_env = std::getenv("ODGS_OPTIMIZATION_PASSES");
+    const int optimization_passes = passes_env ? std::stoi(passes_env) : 1;
+    TORCH_CHECK(optimization_passes > 0, "ODGS_OPTIMIZATION_PASSES must be positive");
+    if (optimization_passes > 1) {
+        const auto original_schedule = opt_list;
+        for (int pass = 1; pass < optimization_passes; ++pass)
+            opt_list.insert(opt_list.end(), original_schedule.begin(), original_schedule.end());
+    }
+    // Construct the unchanged joint schedule first; warmup consumes no RNG draws.
+    const std::string warmup_mode=daeo_warmup::mode();
+    TORCH_CHECK(warmup_mode=="off" || warmup_mode=="all" || warmup_mode=="target", "Unknown DAEO warmup mode");
+    const int regular_steps=opt_list.size();
+    const int warmup_steps=(warmup_mode!="off" && train_camera_num>=5)?daeo_warmup::steps():0;
+    torch::Tensor warmup_pool, birth_frames;
+    int64_t target_count=0;
+    if(warmup_steps) {
+        auto lab=daeo::metadata(pc).to(torch::kCUDA);
+        birth_frames=lab.select(1,1);
+        warmup_pool=(lab.select(1,3)>0)&(birth_frames>=dataset->train_cameras_[train_camera_num-5]->frame_index_);
+        target_count=warmup_pool.sum().item<int64_t>();
+        std::vector<int> extra;
+        for(int k=0;k<warmup_steps;++k)extra.push_back(train_camera_num-5+k%5);
+        opt_list.insert(opt_list.begin(),extra.begin(),extra.end());
+    }
+    if(!dataset->diagnosis_dir_.empty()) {
+        auto path=dataset->diagnosis_dir_+"/warmup_rounds.csv";bool header=!fs::exists(path);std::ofstream f(path,std::ios::app);
+        if(header)f<<"frame,mode,regular_steps,warmup_steps,target_gs\n";
+        f<<dataset->all_frame_num_-1<<','<<warmup_mode<<','<<regular_steps<<','<<warmup_steps<<','<<target_count<<'\n';
+    }
+
     torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_optlist_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
@@ -1929,24 +1966,36 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
 
         pc->t_start_ = std::chrono::steady_clock::now();
         auto visible = std::get<4>(render_pkg);
+        auto diagnostic_visible=visible;
+        const bool warmup_step=daeo_step<warmup_steps;
+        torch::Tensor allowed;
+        if(warmup_step && warmup_mode=="target") {
+            // Do not train a newborn on a view preceding its initialization.
+            allowed=warmup_pool & (birth_frames<=viewpoint_cam->frame_index_);
+            visible=visible & allowed;
+        }
         updated_num += visible.sum().item<int>();
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
         const bool inspect = daeo::enabled() && daeo::selected(dataset->all_frame_num_-1) &&
-            (daeo_step < 3 || idx == train_camera_num-1);
+            (daeo_step < 3 || daeo_step==warmup_steps || idx == train_camera_num-1);
         daeo::Step daeo_state;
-        if (inspect) daeo_state = daeo::beforeStep(dataset, pc, visible);
+        if (inspect) daeo_state = daeo::beforeStep(dataset, pc, diagnostic_visible);
+        daeo_warmup::FreezeAudit freeze_audit;
+        if(inspect && warmup_step && warmup_mode=="target")freeze_audit=daeo_warmup::before(pc,allowed);
         pc->sparse_optimizer_->step();
+        if(inspect && warmup_step && warmup_mode=="target")daeo_warmup::after(dataset,pc,freeze_audit,idx,daeo_step);
         if (inspect) daeo::afterStep(dataset, pc, daeo_state, idx, daeo_step);
         ++daeo_step;
         pc->sparse_optimizer_->zero_grad(true);
         if (pc->apply_exposure_)
         {
-            pc->exposure_optimizer_->step();
+            if(!warmup_step) pc->exposure_optimizer_->step();
             pc->exposure_optimizer_->zero_grad(true);
         }
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
+        if(warmup_steps && daeo_step==warmup_steps)daeo::snapshot(dataset,pc,"warm");
     }
 
     daeo::snapshot(dataset, pc, "after");

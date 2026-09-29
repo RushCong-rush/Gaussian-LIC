@@ -7,11 +7,22 @@
 // Stable diagnostic IDs survive optional free-space deletion.
 namespace daeo {
 inline bool enabled() { return std::getenv("ODGS_DAEO_DIAG") != nullptr; }
-inline bool selected(int f) { return f >= 599 && ((f+1)%50 == 0 || f==934 || f==1034); }
+inline bool tracking() {
+    const char* mode=std::getenv("ODGS_DAEO_WARMUP");
+    return enabled() || (mode && std::string(mode)!="off");
+}
+inline bool denseSelected(int f) {
+    const char* range=std::getenv("ODGS_DAEO_DENSE_RANGE");
+    if(!range) return false;
+    const std::string s(range);const auto sep=s.find(':');
+    return f>=std::stoi(s.substr(0,sep)) && f<=std::stoi(s.substr(sep+1)) && (f+1)%5==0;
+}
+inline bool selected(int f) { return denseSelected(f) || (f >= 599 && ((f+1)%50 == 0 || f==934 || f==1034)); }
+inline bool auditSelected(int f) {const char* s=std::getenv("ODGS_DAEO_AUDIT_FRAME");return enabled() && s && f==std::stoi(s);}
 inline std::vector<float>& labels() { static std::vector<float> v; return v; }
 inline int64_t& nextId() { static int64_t n=0; return n; }
 inline void prune(torch::Tensor keep) {
-    if(!enabled()) return;
+    if(!tracking()) return;
     auto k=keep.cpu().contiguous();auto* ptr=k.data_ptr<bool>();auto old=labels();
     TORCH_CHECK((int64_t)old.size()==k.numel()*4,"DAEO prune metadata mismatch");
     labels().clear();
@@ -28,7 +39,7 @@ inline void binary(const std::string& path, torch::Tensor t) {
 inline void append(const std::shared_ptr<Dataset>& d, std::shared_ptr<GaussianModel> pc,
                    torch::Tensor xyz, torch::Tensor scales, torch::Tensor rot,
                    torch::Tensor opacity, torch::Tensor source, torch::Tensor rescued) {
-    if(!enabled()) return;
+    if(!tracking()) return;
     torch::NoGradGuard g;
     int64_t old=pc->getXYZ().size(0),n=xyz.size(0);
     auto& l=labels(); TORCH_CHECK((int64_t)l.size()==old*4,"DAEO append-only ID mismatch");
@@ -36,13 +47,14 @@ inline void append(const std::shared_ptr<Dataset>& d, std::shared_ptr<GaussianMo
     auto a=rescued.to(torch::kCPU).to(torch::kInt32).contiguous();
     int frame=d->all_frame_num_-1;
     for(int64_t i=0;i<n;++i) {l.push_back(nextId()++);l.push_back(frame);l.push_back(s.data_ptr<int>()[i]);l.push_back(a.data_ptr<int>()[i]);}
+    if(!enabled()) return;
     auto lab=torch::from_blob(l.data()+old*4,{n,4},torch::kFloat32).clone();
     binary(folder(d)+"/birth_"+std::to_string(frame)+".f32",
         torch::cat({lab,xyz.detach().cpu(),scales.detach().exp().cpu(),
                     torch::nn::functional::normalize(rot.detach()).cpu(),opacity.detach().sigmoid().cpu()},1));
 }
 inline void initialize(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianModel> pc) {
-    if(!enabled() || !labels().empty()) return;
+    if(!tracking() || !labels().empty()) return;
     for(int64_t i=0;i<pc->getXYZ().size(0);++i) {auto& l=labels();l.push_back(nextId()++);l.push_back(d->all_frame_num_-1);l.push_back(-1);l.push_back(0);}
 }
 inline torch::Tensor metadata(std::shared_ptr<GaussianModel> pc) {

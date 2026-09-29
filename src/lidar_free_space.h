@@ -136,6 +136,18 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     auto remove=lidar_remove|dap_remove;int64_t nr=remove.sum().item<int64_t>();
     auto folder=d->diagnosis_dir_+"/free_space";
     if(!d->diagnosis_dir_.empty()) std::filesystem::create_directories(folder);
+    if(daeo::auditSelected(c->frame_index_)) {
+        const auto stem=folder+"/audit_"+std::to_string(c->frame_index_);
+        daeo::binary(stem+"_gates.f32",torch::cat({daeo::metadata(pc).to(torch::kCUDA),
+            torch::stack({r,ref,sigma,op,count.flatten().index_select(0,pix),
+            (hi-lo).flatten().index_select(0,pix),reliable.flatten().index_select(0,pix).to(torch::kFloat32),
+            large.to(torch::kFloat32),conflict.to(torch::kFloat32),footprint_conflict.to(torch::kFloat32),
+            dap_conflict.to(torch::kFloat32),remove.to(torch::kFloat32)},1)},1));
+        std::ofstream mf(stem+"_model.bin",std::ios::binary);mf.write((const char*)&n,sizeof(n));
+        for(auto tensor:{pc->getXYZ(),pc->getFeaturesDc(),pc->getFeaturesRest(),pc->getOpacity(),pc->getScaling(),pc->getRotation()}) {
+            auto cpu=tensor.detach().cpu().contiguous();mf.write((const char*)cpu.data_ptr<float>(),cpu.numel()*4);
+        }
+    }
     if(nr) {
         if(daeo::enabled()) {
         auto ids=torch::nonzero(remove).squeeze(1);
