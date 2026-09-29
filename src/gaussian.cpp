@@ -42,6 +42,7 @@
 
 #include "daeo_diagnostics.h"
 #include "lidar_free_space.h"
+#include "gs_cohort_trace.h"
 
 namespace fs = std::filesystem;
 
@@ -1788,6 +1789,14 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                << pc->map_extension_depth_rescued_opacity_ << ','
                << pc->map_extension_depth_rescued_scale_multiplier_ << '\n';
     }
+#ifdef ODGS_GS_TRACE
+    if (gs_trace::enabled()) {
+        auto extra = (farther_depth_conflict & (~filtered_is_dap) & (~alpha_open) &
+                      (~closer_depth_conflict)).index({valid_flag});
+        daeo::binary(daeo::folder(dataset)+"/birth_extra_"+
+            std::to_string(dataset->all_frame_num_-1)+".f32",extra);
+    }
+#endif
     daeo::append(dataset, pc, fused_point_cloud, scales, rots, opacities,
                  filtered_is_dap.index({valid_flag}), accepted_depth_rescued);
     pc->densificationPostfix(fused_point_cloud, features_dc, features_rest, opacities, scales, rots);
@@ -1883,7 +1892,14 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
         pc->t_start_ = std::chrono::steady_clock::now();
+#ifdef ODGS_GS_TRACE
+        auto trace = gs_trace::begin(dataset, pc, viewpoint_cam->frame_index_, daeo_step);
+#endif
         auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_, false, 1.0f, true, true);
+#ifdef ODGS_GS_TRACE
+        gs_trace::endRender(trace);
+        gs_trace::verify(trace,dataset,pc,viewpoint_cam,bg,render_pkg);
+#endif
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
         const bool use_image_valid_mask =
@@ -1941,6 +1957,10 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
                 ? loss_utils::fused_ssim_masked(rendered_image_unsq, gt_image_unsq, image_valid_mask)
                 : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
+#ifdef ODGS_GS_TRACE
+        auto photometric_loss = loss.clone();
+        gs_trace::photoGrad(trace, photometric_loss, pc);
+#endif
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
@@ -1960,7 +1980,13 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             (daeo_step < 3 || idx == train_camera_num-1);
         daeo::Step daeo_state;
         if (inspect) daeo_state = daeo::beforeStep(dataset, pc, visible);
+#ifdef ODGS_GS_TRACE
+        gs_trace::before(trace, pc);
+#endif
         pc->sparse_optimizer_->step();
+#ifdef ODGS_GS_TRACE
+        gs_trace::after(trace,dataset,pc,viewpoint_cam->frame_index_,daeo_step,visible);
+#endif
         if (inspect) daeo::afterStep(dataset, pc, daeo_state, idx, daeo_step);
         ++daeo_step;
         pc->sparse_optimizer_->zero_grad(true);

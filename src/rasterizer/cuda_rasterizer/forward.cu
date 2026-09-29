@@ -607,6 +607,46 @@ renderCUDA(
 }
 
 
+#ifdef ODGS_GS_TRACE
+// Separate read-only pass over exactly the same sorted tile lists. Native forward/backward are untouched.
+static const unsigned char* trace_selected=nullptr;
+static const bool* trace_valid=nullptr;
+static float* trace_out=nullptr;
+static int trace_n=0;
+extern "C" void gsTracePointers(const unsigned char* ids,const bool* valid,float* out,int n) {
+    trace_selected=ids;trace_valid=valid;trace_out=out;trace_n=n;
+}
+__global__ void traceContributions(const uint2* ranges,const uint32_t* list,int W,int H,
+    const float2* means,const float* depths,const float* colors,const float4* conic,
+    bool erp,const bool* valid,const float* depth_visibility,const unsigned char* selected,
+    const bool* metric_valid,float* out,int n) {
+    const int x=blockIdx.x*BLOCK_X+threadIdx.x,y=blockIdx.y*BLOCK_Y+threadIdx.y;
+    if(x>=W||y>=H) return;
+    const int pixel=y*W+x;
+    if((valid&&!valid[pixel])||(metric_valid&&!metric_valid[pixel])) return;
+    uint2 range=ranges[blockIdx.y*((W+BLOCK_X-1)/BLOCK_X)+blockIdx.x];
+    float T=1.f;bool stopped=false;
+    for(unsigned k=range.x;k<range.y;++k) {
+        const int id=list[k];float dx=means[id].x-x,dy=means[id].y-y;
+        if(erp) dx=periodicPixelDifference(dx,W);
+        float4 c=conic[id];float power=-.5f*(c.x*dx*dx+c.z*dy*dy)-c.y*dx*dy;
+        if(power>0.f) continue;
+        const float alpha=fminf(.99f,c.w*expf(power)*depthVisibilityGate(depth_visibility,pixel,W*H,depths[id]));
+        if(alpha<1.f/255.f) continue;
+        float next=T*(1-alpha);
+        bool contributes=!stopped&&next>=.0001f;
+        if(selected[id]) {
+            const float physical=alpha*T,actual=contributes?physical:0.f;
+            atomicAdd(out+id,alpha);atomicAdd(out+n+id,physical);atomicAdd(out+2*n+id,actual);
+            for(int ch=0;ch<3;++ch) atomicAdd(out+(3+ch)*n+id,actual*colors[3*id+ch]);
+            atomicAdd(out+6*n+id,1.f);if(contributes)atomicAdd(out+7*n+id,1.f);
+        }
+        if(next<.0001f) stopped=true;
+        T=next; // Continue only the diagnostic transmittance after the native early stop.
+    }
+}
+#endif
+
 void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	const uint32_t* point_list,
 	const uint32_t* per_tile_bucket_offset, uint32_t* bucket_to_tile,
@@ -652,6 +692,10 @@ void FORWARD::render( const dim3 grid, dim3 block, const uint2* ranges,
 	};
 	if (save_backward) launch(std::false_type{});
 	else launch(std::true_type{});
+#ifdef ODGS_GS_TRACE
+    if(trace_out) traceContributions<<<grid,block>>>(ranges,point_list,W,H,means2D,depths,colors,
+        conic_opacity,equirectangular,valid_mask,depth_visibility,trace_selected,trace_valid,trace_out,trace_n);
+#endif
 }
 
 void FORWARD::preprocess(int P, int D, int M,
