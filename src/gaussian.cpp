@@ -1801,6 +1801,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     pc->t_start_ = std::chrono::steady_clock::now();
     daeo::initialize(dataset, pc);
     daeo::snapshot(dataset, pc, "before");
+    lidar_free_space::beginScores(dataset);
     int updated_num = 0;
     std::vector<int> opt_list;
     int max_iters = 100;
@@ -1861,6 +1862,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_, false, 1.0f, true, true);
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
+        lidar_free_space::recordScore(dataset,pc,idx,rendered_depth,std::get<2>(render_pkg));
         const bool use_image_valid_mask =
             image_valid_mask.defined() && viewpoint_cam->is_equirectangular_;
         auto depth_mask = (gt_depth > 0) & (rendered_depth > 0);
@@ -1949,6 +1951,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
     }
 
+    lidar_free_space::afterOptimization(dataset,pc);
     daeo::snapshot(dataset, pc, "after");
     return updated_num / opt_list.size();
 }

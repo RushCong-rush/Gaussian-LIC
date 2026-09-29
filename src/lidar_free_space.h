@@ -30,10 +30,13 @@ inline void erase(std::shared_ptr<GaussianModel> pc,torch::Tensor keep) {
     pc->Tensor_vec_scaling_={result[4]};pc->Tensor_vec_rotation_={result[5]};
     daeo::prune(keep);
 }
-inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianModel> pc) {
+inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianModel> pc,
+                  std::shared_ptr<Camera> camera=nullptr,const std::string& stage="pre") {
     if(!d->equirectangular_ || option("ODGS_FREE_SPACE_PRUNE",1)==0) return;
     torch::NoGradGuard guard;auto start=std::chrono::steady_clock::now();
-    auto c=d->train_cameras_.back();int H=c->image_height_,W=c->image_width_;
+    auto c=camera?camera:d->train_cameras_.back();int H=c->image_height_,W=c->image_width_;
+    const int frame=d->all_frame_num_-1;
+    const std::string stamp=std::to_string(frame)+(stage=="pre"?"":"_"+stage+"_"+std::to_string(c->frame_index_));
     // LiDAR evidence uses measured pixels; DAP evidence is handled separately below.
     auto dep=c->diagnostic_depth_.to(torch::kCUDA).reshape({H,W});
     auto valid=c->lidar_valid_mask_.to(torch::kCUDA).reshape({H,W}).to(torch::kBool)&torch::isfinite(dep)&(dep>0);
@@ -108,8 +111,9 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     auto lidar_remove=votes>=option("ODGS_FREE_SPACE_VOTES",1);
     auto dap_remove=torch::zeros_like(lidar_remove),dap_conflict=torch::zeros_like(conflict);
     static torch::Tensor dap_votes;
+    if(dap_votes.defined() && dap_votes.numel()<n) dap_votes=torch::cat({dap_votes,torch::zeros({n-dap_votes.numel()},xyz.options())});
     auto deletion_ref=ref;
-    if(option("ODGS_FREE_SPACE_DAP",1)!=0 && c->has_dap_depth_) {
+    if(stage=="pre" && option("ODGS_FREE_SPACE_DAP",1)!=0 && c->has_dap_depth_) {
         // DAP is weaker evidence: no nearby LiDAR, coherent depth and a larger gap.
         auto dense_valid=torch::isfinite(dep)&(dep>0);
         if(d->metric_mask_.defined())dense_valid=dense_valid&d->metric_mask_.to(torch::kCUDA).reshape({H,W}).to(torch::kBool);
@@ -138,15 +142,16 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     if(!d->diagnosis_dir_.empty()) std::filesystem::create_directories(folder);
     if(nr) {
         if(daeo::enabled()) {
+        std::ofstream pose(folder+"/pose_"+stamp+".txt");pose<<std::setprecision(17)<<c->R_cw_<<'\n'<<c->t_cw_.transpose()<<'\n';
         auto ids=torch::nonzero(remove).squeeze(1);
         auto labels=daeo::enabled()?daeo::metadata(pc).to(torch::kCUDA):torch::zeros({n,4},xyz.options());
-        daeo::binary(folder+"/removed_"+std::to_string(c->frame_index_)+".f32",torch::cat({labels.index_select(0,ids),xyz.index_select(0,ids),pc->getScaling().index_select(0,ids),pc->getRotation().index_select(0,ids),pc->getOpacity().index_select(0,ids),deletion_ref.index_select(0,ids).unsqueeze(1),r.index_select(0,ids).unsqueeze(1)},1));
+        daeo::binary(folder+"/removed_"+stamp+".f32",torch::cat({labels.index_select(0,ids),xyz.index_select(0,ids),pc->getScaling().index_select(0,ids),pc->getRotation().index_select(0,ids),pc->getOpacity().index_select(0,ids),deletion_ref.index_select(0,ids).unsqueeze(1),r.index_select(0,ids).unsqueeze(1)},1));
         auto evidence=dap_remove.index_select(0,ids).to(torch::kCPU).to(torch::kUInt8).contiguous();
-        std::ofstream ef(folder+"/removed_evidence_"+std::to_string(c->frame_index_)+".u8",std::ios::binary);ef.write((char*)evidence.data_ptr<uint8_t>(),evidence.numel());
+        std::ofstream ef(folder+"/removed_evidence_"+stamp+".u8",std::ios::binary);ef.write((char*)evidence.data_ptr<uint8_t>(),evidence.numel());
         if(footprint_weights.defined()) {
             auto fp=(footprint_conflict&lidar_remove).index_select(0,ids).to(torch::kCPU).to(torch::kUInt8).contiguous();
-            std::ofstream ff(folder+"/removed_footprint_"+std::to_string(c->frame_index_)+".u8",std::ios::binary);ff.write((char*)fp.data_ptr<uint8_t>(),fp.numel());
-            daeo::binary(folder+"/footprint_weights_"+std::to_string(c->frame_index_)+".f32",footprint_weights.index_select(1,ids).transpose(0,1));
+            std::ofstream ff(folder+"/removed_footprint_"+stamp+".u8",std::ios::binary);ff.write((char*)fp.data_ptr<uint8_t>(),fp.numel());
+            daeo::binary(folder+"/footprint_weights_"+stamp+".f32",footprint_weights.index_select(1,ids).transpose(0,1));
         }
         }
         auto keep=~remove;erase(pc,keep);votes=votes.index({keep});
@@ -154,8 +159,44 @@ inline void apply(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianMode
     }
     if(d->diagnosis_dir_.empty()) return;
     auto path=folder+"/events.csv";bool head=!std::filesystem::exists(path);std::ofstream f(path,std::ios::app);
-    if(head)f<<"frame,gs_before,reliable_pixels,conflict_gs,removed_gs,elapsed_ms,lidar_removed_gs,dap_removed_gs,dap_conflict_gs,extra_support_pixels,extra_support_removed_gs,footprint_removed_gs\n";
+    if(head)f<<"frame,gs_before,reliable_pixels,conflict_gs,removed_gs,elapsed_ms,lidar_removed_gs,dap_removed_gs,dap_conflict_gs,extra_support_pixels,extra_support_removed_gs,footprint_removed_gs,stage,reference_frame\n";
     torch::cuda::synchronize();double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-    f<<c->frame_index_<<','<<n<<','<<reliable.sum().item<int64_t>()<<','<<conflict.sum().item<int64_t>()<<','<<nr<<','<<ms<<','<<lidar_remove.sum().item<int64_t>()<<','<<dap_remove.sum().item<int64_t>()<<','<<dap_conflict.sum().item<int64_t>()<<','<<(reliable&~original_reliable).sum().item<int64_t>()<<','<<(lidar_remove&~original_reliable.flatten().index_select(0,pix)&~footprint_conflict).sum().item<int64_t>()<<','<<(lidar_remove&footprint_conflict).sum().item<int64_t>()<<'\n';
+    f<<frame<<','<<n<<','<<reliable.sum().item<int64_t>()<<','<<conflict.sum().item<int64_t>()<<','<<nr<<','<<ms<<','<<lidar_remove.sum().item<int64_t>()<<','<<dap_remove.sum().item<int64_t>()<<','<<dap_conflict.sum().item<int64_t>()<<','<<(reliable&~original_reliable).sum().item<int64_t>()<<','<<(lidar_remove&~original_reliable.flatten().index_select(0,pix)&~footprint_conflict).sum().item<int64_t>()<<','<<(lidar_remove&footprint_conflict).sum().item<int64_t>()<<','<<stage<<','<<c->frame_index_<<'\n';
+}
+// Reuse native optimization renders to rank recently observed depth conflicts.
+inline std::vector<double>& recentScores() {static std::vector<double> values;return values;}
+inline bool scoringRound(const std::shared_ptr<Dataset>& d) {
+    return option("ODGS_FREE_SPACE_GATED_RECHECK",0)!=0 && d->equirectangular_ &&
+        d->train_cameras_.size()%int(option("ODGS_FREE_SPACE_GATED_PERIOD",5))==0;
+}
+inline void beginScores(const std::shared_ptr<Dataset>& d) {
+    if(scoringRound(d))recentScores().assign(d->train_cameras_.size(),-1.);
+}
+inline void recordScore(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianModel> pc,
+                        int idx,torch::Tensor depth,torch::Tensor transmittance) {
+    if(!scoringRound(d)||idx<int(d->train_cameras_.size())-int(option("ODGS_FREE_SPACE_GATED_WINDOW",10)))return;
+    torch::NoGradGuard guard;auto c=d->train_cameras_[idx];
+    auto measured=c->diagnostic_depth_.to(torch::kCUDA).squeeze();
+    auto valid=c->lidar_valid_mask_.to(torch::kCUDA).to(torch::kBool).squeeze()&torch::isfinite(measured)&(measured>0);
+    if(d->metric_mask_.defined()) valid&=d->metric_mask_.to(torch::kCUDA).to(torch::kBool).squeeze();
+    auto gap=torch::maximum(torch::full_like(measured,pc->map_extension_min_depth_gap_m_),measured*pc->map_extension_relative_depth_gap_);
+    auto conflict=valid&torch::isfinite(depth.squeeze())&(depth.squeeze()>0)&
+        (depth.squeeze()+gap<measured)&((1-transmittance.squeeze())>=.99);
+    recentScores()[idx]=(conflict.sum().to(torch::kFloat32)/valid.sum().clamp_min(1)).item<double>();
+}
+inline void afterOptimization(const std::shared_ptr<Dataset>& d,std::shared_ptr<GaussianModel> pc) {
+    if(!scoringRound(d)||option("ODGS_FREE_SPACE_PRUNE",1)==0)return;
+    TORCH_CHECK(option("ODGS_FREE_SPACE_VOTES",1)==1,"LiDAR rechecks require one confirmation");
+    std::vector<int> order;
+    for(int i=0;i<int(recentScores().size());++i)if(recentScores()[i]>=0)order.push_back(i);
+    std::sort(order.begin(),order.end(),[](int a,int b){return recentScores()[a]!=recentScores()[b]?recentScores()[a]>recentScores()[b]:a>b;});
+    int used=0;const int budget=int(option("ODGS_FREE_SPACE_GATED_BUDGET",1));
+    const auto path=d->diagnosis_dir_+"/gated_recheck_scores.csv";bool header=!std::filesystem::exists(path);
+    std::ofstream log(path,std::ios::app);if(header)log<<"frame,reference_frame,conflict_fraction,selected\n";
+    for(int idx:order) {
+        const bool selected=used<budget&&recentScores()[idx]>=option("ODGS_FREE_SPACE_GATED_THRESHOLD",.1);
+        log<<d->all_frame_num_-1<<','<<d->train_cameras_[idx]->frame_index_<<','<<recentScores()[idx]<<','<<selected<<'\n';
+        if(selected){apply(d,pc,d->train_cameras_[idx],"gated");++used;}
+    }
 }
 }
