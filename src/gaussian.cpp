@@ -631,6 +631,8 @@ void Dataset::addFrame(Frame& cur_frame)
             // controlled number of DAP-supported ERP Gaussians.
             cv::Mat depth_edges = depthEdgeMagnitude(depth_map, equirectangular_);
             cv::Mat mask_not_edges = depth_edges < dap_seed_max_depth_gradient_;
+            if (lidar_free_space::option("ODGS_EXTENSION_DAP_EDGE_OFF", 0) != 0)
+                mask_not_edges.setTo(255);
             cv::Mat seed_mask = (depth_map >= min_point_depth_) &
                                 mask_not_edges & (depth_map < max_depth_);
             if (use_erp_valid_mask) seed_mask &= metric_mask_cv_;
@@ -1574,9 +1576,16 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         pc->map_extension_relative_depth_gap_ * filtered_projected_depths);
     auto closer_depth_conflict = rendered_depth_valid &
         (filtered_projected_depths + closer_depth_threshold < candidate_rendered_depth);
-    auto depth_rescued = geometrically_valid & (~alpha_open) & closer_depth_conflict;
+    auto farther_depth_conflict = rendered_depth_valid &
+        (candidate_rendered_depth + closer_depth_threshold < filtered_projected_depths);
+    auto rescue_conflict = closer_depth_conflict;
+    if (lidar_free_space::option("ODGS_EXTENSION_LIDAR_BIDIRECTIONAL", 0) != 0)
+        rescue_conflict = rescue_conflict | (farther_depth_conflict & (~filtered_is_dap));
+    auto depth_rescued = geometrically_valid & (~alpha_open) & rescue_conflict;
     if (!depthAwareMapExtensionEnabled()) depth_rescued = torch::zeros_like(depth_rescued);
     auto valid_flag = geometrically_valid & (alpha_open | depth_rescued);
+
+    auto admitted_before_patch = valid_flag.clone();
 
     // Subsample only after both extend paths have admitted their candidates.
     if (dataset->lidar_patch_size_ > 0)
@@ -1692,6 +1701,22 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                 << candidate_farther_conflict.sum().item<int64_t>() << ','
                 << farther_conflict_lidar.sum().item<int64_t>() << ','
                 << farther_conflict_dap.sum().item<int64_t>() << '\n';
+
+        if (lidar_free_space::option("ODGS_EXTENSION_CANDIDATE_DIAG", 0) != 0)
+        {
+            // XYZ permits reprojection of neighboring candidates into one common view.
+            auto evidence = torch::cat({filtered_points,
+                torch::stack({x_coords.to(torch::kFloat32), y_coords.to(torch::kFloat32),
+                    filtered_projected_depths, candidate_rendered_depth, candidate_alpha,
+                    filtered_is_dap.to(torch::kFloat32), admitted_before_patch.to(torch::kFloat32),
+                    valid_flag.to(torch::kFloat32), closer_depth_conflict.to(torch::kFloat32),
+                    farther_depth_conflict.to(torch::kFloat32)}, 1)}, 1).to(torch::kCPU).contiguous();
+            fs::create_directories(dataset->diagnosis_dir_ + "/extension_candidates");
+            std::ofstream out(dataset->diagnosis_dir_ + "/extension_candidates/" +
+                std::to_string(frame_index) + ".f32", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(evidence.data_ptr<float>()),
+                      evidence.numel() * sizeof(float));
+        }
 
         // Record only centers actually admitted after pixel and patch selection.
         const auto inserted = torch::stack({x_pixel, y_pixel, depths}, 1)
