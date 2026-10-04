@@ -167,7 +167,7 @@ public:
         lambda_depth = node["lambda_depth"].as<double>();
         iteration_decay = node["iteration_decay"].as<bool>();
         optimization_recent_keyframes = node["optimization_recent_keyframes"]
-            ? node["optimization_recent_keyframes"].as<int>() : 15;
+            ? node["optimization_recent_keyframes"].as<int>() : 10;
         if (optimization_recent_keyframes < 0 || optimization_recent_keyframes > 100)
             throw std::invalid_argument("optimization_recent_keyframes must be between 0 and 100");
 

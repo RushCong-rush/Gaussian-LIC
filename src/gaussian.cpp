@@ -1807,7 +1807,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     int updated_num = 0;
     std::vector<int> opt_list;
     const char* max_views_env = std::getenv("ODGS_OPTIMIZATION_MAX_VIEWS");
-    int max_iters = max_views_env ? std::stoi(max_views_env) : 100;
+    int max_iters = max_views_env ? std::stoi(max_views_env) : 70;
     TORCH_CHECK(max_iters > 0, "ODGS_OPTIMIZATION_MAX_VIEWS must be positive");
 
     int train_camera_num = dataset->train_cameras_.size();
