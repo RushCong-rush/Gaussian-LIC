@@ -92,9 +92,13 @@ add_executable(gs_mapping
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/forward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/backward.cu
               ${PROJECT_SOURCE_DIR}/src/rasterizer/cuda_rasterizer/rasterizer_impl.cu)
-target_compile_definitions(gs_mapping PRIVATE ODGS_FREE_SPACE_FOOTPRINT)
+get_filename_component(ODGS_PYTHON_BIN "${Python3_EXECUTABLE}" DIRECTORY)
+get_filename_component(ODGS_PYTHON_PREFIX "${ODGS_PYTHON_BIN}" DIRECTORY)
+target_compile_definitions(gs_mapping PRIVATE ODGS_FREE_SPACE_FOOTPRINT
+  ODGS_PYTHON_HOME=L"${ODGS_PYTHON_PREFIX}")
 add_dependencies(gs_mapping ${PROJECT_NAME}_generate_messages_cpp)
-target_link_libraries(gs_mapping 
+target_link_libraries(gs_mapping
+                      -Wl,--no-as-needed ${Python3_LIBRARIES} -Wl,--as-needed
                       ${catkin_LIBRARIES} 
                       ${OpenCV_LIBS} 
                       ${TORCH_LIBRARIES} 

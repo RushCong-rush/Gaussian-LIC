@@ -17,6 +17,7 @@
  */
 
 #include "mapping.h"
+#include "embedded_depth.h"
 #include "third_person.h"
 #include "gaussian.h"
 #include "pose_feedback.h"
@@ -38,6 +39,7 @@
 
 namespace fs = std::filesystem;
 
+std::unique_ptr<EmbeddedDepth> embedded_depth;
 std::mutex m_buf;
 std::condition_variable con;
 
@@ -195,6 +197,7 @@ void poseCallback(const geometry_msgs::PoseStampedConstPtr& pose_msg)
 
 void imageCallback(const sensor_msgs::ImageConstPtr& image_msg) 
 {
+    if(embedded_depth)embedded_depth->push(image_msg);
     m_buf.lock();
     image_buf.push(image_msg);
     m_buf.unlock();
@@ -581,7 +584,11 @@ int main(int argc, char** argv)
         return 2;
     }
     std::string dap_topic = config_node["dap_topic"] ? config_node["dap_topic"].as<std::string>() : "/depth_dap_for_gs";
-    if (online_dap_enabled)
+    std::string depth_transport;
+    nh.param<std::string>("depth_transport", depth_transport,
+        config_node["depth_transport"] ? config_node["depth_transport"].as<std::string>() : "ros");
+    const bool embedded_dap = online_dap_enabled && depth_transport == "embedded";
+    if (online_dap_enabled && !embedded_dap)
         dap_depth_sub = it_.subscribe(dap_topic, 100, dapDepthCallback);
     int sh_degree_override;
     if (nh.getParam("sh_degree", sh_degree_override))
@@ -609,6 +616,15 @@ int main(int argc, char** argv)
     depth_buf.setCacheDirectory(queue_cache / "depth");
     dap_depth_buf.setCacheDirectory(queue_cache / "dap");
 
+    if (embedded_dap) {
+        const std::string depth_output = result_path + "/depth";
+        setenv("ODGS_DEPTH_OUTPUT", depth_output.c_str(), 1);
+        const char* weights = std::getenv("DAP_WEIGHTS");
+        if (!weights) throw std::runtime_error("Set DAP_WEIGHTS to the DAP checkpoint");
+        embedded_depth = std::make_unique<EmbeddedDepth>(depth_output, weights,
+            config_node["metric_mask_path"] ? config_node["metric_mask_path"].as<std::string>() : "",
+            dapDepthCallback, config_node["select_every_k_frame"].as<int>());
+    }
     std::thread mapping_process(mapping, config_node, result_path, lpips_path);
     std::thread monitor_thread([](){
         while (!exit_flag) 
@@ -641,6 +657,7 @@ int main(int argc, char** argv)
     ros::spin();
 
     mapping_process.join();
+    embedded_depth.reset();
     monitor_thread.join();
     fs::remove_all(queue_cache);
     
