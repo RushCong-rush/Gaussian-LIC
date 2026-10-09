@@ -168,9 +168,12 @@ void saveOnlineFrame(const std::shared_ptr<Camera>& camera,
         valid_mask = dataset->metric_mask_;
     auto rendered = compositeMaskedImage(std::get<0>(render_pkg), valid_mask, background);
     auto ground_truth = compositeMaskedImage(camera->original_image_, valid_mask, background);
-    saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
-    saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
-    saveDisplayRender(camera, gaussians, render_dir);
+    if (saveDiagnosticImages(camera->frame_index_))
+    {
+        saveRgbTensor(rendered, render_dir + "/" + camera->image_name_);
+        saveRgbTensor(ground_truth, gt_dir + "/" + camera->image_name_);
+        saveDisplayRender(camera, gaussians, render_dir);
+    }
     saveVisibilityDiagnosis(camera, gaussians, background,
                             fs::path(depth_metrics_path).parent_path().string(), "online");
     appendOnlineDepthMetric(camera, std::get<1>(render_pkg), valid_mask, depth_metrics_path);

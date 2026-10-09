@@ -2110,42 +2110,45 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             ssims += ssim;
             lpipss += lpips;
 
-            int H = rendered_image.size(1), W = rendered_image.size(2);
-
-            torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
-            saveDisplayRender(train_camera, pc, render_dir_path);
-
-            torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
-
-            if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
-                export_depth != nullptr && std::string(export_depth) == "1" &&
-                saveDiagnosticImages(train_camera->frame_index_))
+            if (saveDiagnosticImages(train_camera->frame_index_))
             {
-                const std::string rgb_dir = diagnosis_dir_path + "/train_rgb_lossless";
-                fs::create_directories(rgb_dir);
-                const std::string name = fs::path(train_camera->image_name_).stem().string();
-                cv::imwrite(rgb_dir + "/" + name + "_render.png", a_img);
-                cv::imwrite(rgb_dir + "/" + name + "_gt.png", b_img);
-            }
+                int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            auto output_depth = use_metric_mask
-                ? rendered_depth.masked_fill(~metric_mask, 0.0f)
-                : rendered_depth;
-            torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
-                                                     (output_depth.max() - output_depth.min()) * 255;
-            torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
-            cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
-            c_img.convertTo(c_img, CV_8UC1);
-            cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
-            cv::imwrite(render_depth_dir_path + "/" + train_camera->image_name_, c_img);
+                torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
+                saveDisplayRender(train_camera, pc, render_dir_path);
+
+                torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
+
+                if (const char* export_depth = std::getenv("ODGS_EXPORT_FLOAT_DEPTH");
+                    export_depth != nullptr && std::string(export_depth) == "1" &&
+                    saveDiagnosticImages(train_camera->frame_index_))
+                {
+                    const std::string rgb_dir = diagnosis_dir_path + "/train_rgb_lossless";
+                    fs::create_directories(rgb_dir);
+                    const std::string name = fs::path(train_camera->image_name_).stem().string();
+                    cv::imwrite(rgb_dir + "/" + name + "_render.png", a_img);
+                    cv::imwrite(rgb_dir + "/" + name + "_gt.png", b_img);
+                }
+
+                auto output_depth = use_metric_mask
+                    ? rendered_depth.masked_fill(~metric_mask, 0.0f)
+                    : rendered_depth;
+                torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
+                                                         (output_depth.max() - output_depth.min()) * 255;
+                torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
+                cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
+                c_img.convertTo(c_img, CV_8UC1);
+                cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
+                cv::imwrite(render_depth_dir_path + "/" + train_camera->image_name_, c_img);
+            }
         }
         psnrs /= dataset->train_cameras_.size();
         ws_psnrs /= dataset->train_cameras_.size();
@@ -2208,31 +2211,34 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             ssims += ssim;
             lpipss += lpips;
 
-            int H = rendered_image.size(1), W = rendered_image.size(2);
+            if (saveDiagnosticImages(test_camera->frame_index_))
+            {
+                int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
-            saveDisplayRender(test_camera, pc, render_dir_path);
+                torch::Tensor a_cpu = metric_rendered.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
+                saveDisplayRender(test_camera, pc, render_dir_path);
 
-            torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(gt_dir_path + "/" + test_camera->image_name_, b_img);
+                torch::Tensor b_cpu = metric_gt.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(gt_dir_path + "/" + test_camera->image_name_, b_img);
 
-            auto output_depth = use_metric_mask
-                ? rendered_depth.masked_fill(~metric_mask, 0.0f)
-                : rendered_depth;
-            torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
-                                                     (output_depth.max() - output_depth.min()) * 255;
-            torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
-            cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
-            c_img.convertTo(c_img, CV_8UC1);
-            cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
-            cv::imwrite(render_depth_dir_path + "/" + test_camera->image_name_, c_img);
+                auto output_depth = use_metric_mask
+                    ? rendered_depth.masked_fill(~metric_mask, 0.0f)
+                    : rendered_depth;
+                torch::Tensor depth_map_normalized = (output_depth - output_depth.min()) /
+                                                         (output_depth.max() - output_depth.min()) * 255;
+                torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
+                cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
+                c_img.convertTo(c_img, CV_8UC1);
+                cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
+                cv::imwrite(render_depth_dir_path + "/" + test_camera->image_name_, c_img);
+            }
             test_camera->releaseObservations();
             fs::remove(test_camera->observation_cache_path_);
         }
