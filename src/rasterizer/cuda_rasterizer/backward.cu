@@ -442,9 +442,9 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 	glm::mat3 dL_dMt = glm::transpose(dL_dM);
 
 	glm::vec3* dL_dscale = dL_dscales + idx;
-	dL_dscale->x = glm::dot(Rt[0], dL_dMt[0]);
-	dL_dscale->y = glm::dot(Rt[1], dL_dMt[1]);
-	dL_dscale->z = glm::dot(Rt[2], dL_dMt[2]);
+	dL_dscale->x = mod * glm::dot(Rt[0], dL_dMt[0]);
+	dL_dscale->y = mod * glm::dot(Rt[1], dL_dMt[1]);
+	dL_dscale->z = mod * glm::dot(Rt[2], dL_dMt[2]);
 
 	dL_dMt[0] *= s.x;
 	dL_dMt[1] *= s.y;
@@ -760,6 +760,8 @@ PerGaussianRenderCUDA(
 
 
 			// Helpful reusable temporary variables
+            // Match the forward min(0.99, raw_alpha), retaining direct color/depth gradients.
+            if (con_o.w * G >= 0.99f) dL_dalpha = 0.f;
             Register_dL_ddepth += con_o.w * base_G * gate_derivative * dL_dalpha;
 			const float dL_dG = con_o.w * dL_dalpha;
 			const float gdx = G * d.x;

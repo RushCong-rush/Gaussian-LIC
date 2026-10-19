@@ -81,11 +81,12 @@ __global__ void duplicateWithKeys(
 	uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 	const uint32_t offset_to = offsets[idx];
 
+	// Culled lanes still participate in warp collectives, but preprocess did
+	// not write their projection/conic data. Supply inert lane-local values.
+	const float2 xy = active ? points_xy[idx] : make_float2(0.f, 0.f);
+	const float4 co = active ? conic_opacity[idx] : make_float4(0.f, 0.f, 0.f, OPACITY_THRESHOLD);
 	uint2 rect_min, rect_max;
-	getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
-
-	const float2 xy = points_xy[idx];
-	const float4 co = conic_opacity[idx];
+	getRect(xy, active ? radii[idx] : 0, rect_min, rect_max, grid);
 	const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
 	const uint32_t rect_width = (rect_max.x - rect_min.x);
 	const int32_t tile_count_init = (rect_max.y - rect_min.y) * rect_width;
@@ -219,8 +220,9 @@ __global__ void duplicateWithKeysErp(
 
 	uint32_t off = idx == 0 ? 0 : offsets[idx - 1];
 	const uint32_t offset_to = offsets[idx];
-	const float2 xy = points_xy[idx];
-	const float4 co = conic_opacity[idx];
+	// Keep inactive lanes in collectives without reading unwritten preprocess data.
+	const float2 xy = active ? points_xy[idx] : make_float2(0.f, 0.f);
+	const float4 co = active ? conic_opacity[idx] : make_float4(0.f, 0.f, 0.f, OPACITY_THRESHOLD);
 	const float opacity_factor_threshold = logf(co.w / OPACITY_THRESHOLD);
 
 	uint2 rect_min_0, rect_max_0, rect_min_1, rect_max_1;
@@ -406,17 +408,17 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	ImageState img;
 	obtain(chunk, img.n_contrib, N, 128);
 	obtain(chunk, img.ranges, M, 128);
-	int* dummy;
-	int* wummy;
+	int* dummy = nullptr;
+	int* wummy = nullptr;
 	cub::DeviceScan::InclusiveSum(nullptr, img.scan_size, dummy, wummy, N);
 	obtain(chunk, img.contrib_scan, img.scan_size, 128);
 
-	obtain(chunk, img.max_contrib, N, 128);
+	obtain(chunk, img.max_contrib, M, 128); // one entry per tile
 	obtain(chunk, img.pixel_colors, N * NUM_CHAFFELS, 128);
 	obtain(chunk, img.pixel_depth, N, 128);
-	obtain(chunk, img.bucket_count, N, 128);
-	obtain(chunk, img.bucket_offsets, N, 128);
-	cub::DeviceScan::InclusiveSum(nullptr, img.bucket_count_scan_size, img.bucket_count, img.bucket_count, N);
+	obtain(chunk, img.bucket_count, M, 128);
+	obtain(chunk, img.bucket_offsets, M, 128);
+	cub::DeviceScan::InclusiveSum(nullptr, img.bucket_count_scan_size, img.bucket_count, img.bucket_count, M);
 	obtain(chunk, img.bucket_count_scanning_space, img.bucket_count_scan_size, 128);
 
 	return img;
@@ -424,7 +426,7 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 
 CudaRasterizer::SampleState CudaRasterizer::SampleState::fromChunk(char *& chunk, size_t C) {
 	SampleState sample;
-	obtain(chunk, sample.bucket_to_tile, C * BLOCK_SIZE, 128);
+	obtain(chunk, sample.bucket_to_tile, C, 128); // one entry per bucket, not per pixel
 	obtain(chunk, sample.T, C * BLOCK_SIZE, 128);
 	obtain(chunk, sample.ar, NUM_CHAFFELS * C * BLOCK_SIZE, 128);
 	obtain(chunk, sample.ad, C * BLOCK_SIZE, 128);

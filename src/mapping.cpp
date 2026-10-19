@@ -541,10 +541,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     }
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
-    std::cout << std::fixed << std::setprecision(2) << "         1) Forward " << gaussians->t_forward_ << "s" << std::endl;
-    std::cout << std::fixed << std::setprecision(2) << "         2) Backward " << gaussians->t_backward_ << "s" << std::endl;
-    std::cout << std::fixed << std::setprecision(2) << "         3) Step " << gaussians->t_step_ << "s" << std::endl;
-    std::cout << std::fixed << std::setprecision(2) << "         4) CPU2GPU " << gaussians->t_tocuda_ << "s" << std::endl;
+    std::cout << "        [Host-call phase times; overlap GPU work, not GPU kernel durations]" << std::endl;
+    std::cout << std::fixed << std::setprecision(2) << "         1) Forward host calls " << gaussians->t_forward_ << "s" << std::endl;
+    std::cout << std::fixed << std::setprecision(2) << "         2) Backward host calls " << gaussians->t_backward_ << "s" << std::endl;
+    std::cout << std::fixed << std::setprecision(2) << "         3) Step host calls " << gaussians->t_step_ << "s" << std::endl;
+    std::cout << std::fixed << std::setprecision(2) << "         4) CPU2GPU host calls " << gaussians->t_tocuda_ << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Adding Time] " << total_adding_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Extending Time] " << total_extending_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Online Render Time] " << total_online_render_time << "s" << std::endl;

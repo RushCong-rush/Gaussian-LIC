@@ -9,6 +9,7 @@
 
 #include "rasterizer/rasterizer.h"
 #include "depth_loss.h"
+#include "performance_regressions.h"
 
 namespace
 {
@@ -516,6 +517,10 @@ int main(int argc, char** argv)
 {
     torch::NoGradGuard no_grad;
     require(torch::cuda::is_available(), "CUDA is not available");
+    rasterizer_regression::checkAlphaSaturation();
+    rasterizer_regression::checkScaleModifier();
+    rasterizer_regression::checkAllocationUnits();
+    rasterizer_regression::checkCulledLanes();
 
     const auto forward = renderSingle(0.0f, 0.0f, 4.0f, true);
     const auto right = renderSingle(4.0f, 0.0f, 0.0f, true);

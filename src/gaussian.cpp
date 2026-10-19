@@ -1804,7 +1804,9 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     pc->t_start_ = std::chrono::steady_clock::now();
     daeo::initialize(dataset, pc);
     daeo::snapshot(dataset, pc, "before");
-    int updated_num = 0;
+    // Defer visibility readback until the KF ends; the caller retains its CUDA barrier.
+    // Internal host-call timers overlap GPU execution and are not kernel durations.
+    auto updated_num_gpu = torch::zeros({}, pc->getXYZ().options().dtype(torch::kInt64));
     std::vector<int> opt_list;
     const char* max_views_env = std::getenv("ODGS_OPTIMIZATION_MAX_VIEWS");
     int max_iters = max_views_env ? std::stoi(max_views_env) : 70;
@@ -1863,7 +1865,6 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         f<<dataset->all_frame_num_-1<<','<<warmup_mode<<','<<regular_steps<<','<<warmup_steps<<','<<target_count<<'\n';
     }
 
-    torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_optlist_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
 
@@ -1874,7 +1875,6 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
     torch::Tensor image_valid_mask;
     if (dataset->equirectangular_ && dataset->metric_mask_.defined())
         image_valid_mask = dataset->metric_mask_.to(torch::kCUDA);
-    torch::cuda::synchronize();
     pc->t_end_ = std::chrono::steady_clock::now();
     pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
     torch::Tensor latitude_weights;
@@ -1891,7 +1891,6 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         const std::shared_ptr<Camera>& viewpoint_cam = dataset->train_cameras_[idx];
         auto gt_image = viewpoint_cam->original_image_.to(torch::kCUDA, /*non_blocking=*/true);
         auto gt_depth = viewpoint_cam->original_depth_.to(torch::kCUDA, /*non_blocking=*/true);
-        torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_tocuda_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
         pc->t_start_ = std::chrono::steady_clock::now();
@@ -1954,13 +1953,11 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
                 : loss_utils::fused_ssim(rendered_image_unsq, gt_image_unsq);
         auto loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         if (pc->optimize_depth_) loss += lambda_depth * Ll1_depth;
-        torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_forward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
         
         pc->t_start_ = std::chrono::steady_clock::now();
         loss.backward();
-        torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_backward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
 
@@ -1974,7 +1971,7 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             allowed=warmup_pool & (birth_frames<=viewpoint_cam->frame_index_);
             visible=visible & allowed;
         }
-        updated_num += visible.sum().item<int>();
+        updated_num_gpu.add_(visible.sum());
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
         const bool inspect = daeo::enabled() && daeo::selected(dataset->all_frame_num_-1) &&
             (daeo_step < 3 || daeo_step==warmup_steps || idx == train_camera_num-1);
@@ -1992,14 +1989,13 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
             if(!warmup_step) pc->exposure_optimizer_->step();
             pc->exposure_optimizer_->zero_grad(true);
         }
-        torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_step_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();
         if(warmup_steps && daeo_step==warmup_steps)daeo::snapshot(dataset,pc,"warm");
     }
 
     daeo::snapshot(dataset, pc, "after");
-    return updated_num / opt_list.size();
+    return updated_num_gpu.item<int64_t>() / opt_list.size();
 }
 
 void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset, 
